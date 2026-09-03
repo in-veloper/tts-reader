@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
+  Keyboard,
   Modal,
   PanResponder,
   Pressable,
@@ -147,10 +148,25 @@ function Dots() {
 
 export function Sheet({ visible, title, onClose, children }) {
   const translateY = useRef(new Animated.Value(0)).current;
+  const [keyboard, setKeyboard] = useState(0);
 
   // PanResponder 는 한 번만 만들어지므로 최신 onClose 는 ref 로 읽는다.
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
+
+  // 시트는 Modal 안이라 바깥의 KeyboardAvoidingView 가 닿지 않는다.
+  // 키보드 높이를 직접 받아 그만큼 밀어 올린다.
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', (e) =>
+      setKeyboard(e.endCoordinates?.height || 0)
+    );
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboard(0));
+
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   useEffect(() => {
     if (visible) translateY.setValue(0);
@@ -215,7 +231,16 @@ export function Sheet({ visible, title, onClose, children }) {
       <View style={styles.sheetRoot}>
         <Pressable style={styles.backdrop} onPress={onClose} />
 
-        <Animated.View style={[styles.sheet, { transform: [{ translateY }] }]}>
+        <Animated.View
+          style={[
+            styles.sheet,
+            {
+              marginBottom: keyboard,
+              maxHeight: keyboard > 0 ? '60%' : '82%',
+              transform: [{ translateY }],
+            },
+          ]}
+        >
           <View style={styles.dragZone} {...drag.panHandlers}>
             <View style={styles.grabber} />
           </View>

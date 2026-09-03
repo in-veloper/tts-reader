@@ -54,13 +54,21 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
 
   const chunkCount = useMemo(() => chunkText(text).length, [text]);
 
+  // 안드로이드 TTS 엔진은 시스템 서비스에 붙는 데 시간이 걸려서,
+  // 그 사이 getVoices() 를 부르면 조용히 빈 목록을 돌려줄 때가 있다(오류 아님).
+  // 비어 있으면 잠깐 두고 다시 물어본다.
   const loadVoices = useCallback(async () => {
     setLoadingVoices(true);
     try {
-      const all = await Speech.getAvailableVoicesAsync();
-      const korean = all.filter((v) =>
-        (v.language || '').toLowerCase().startsWith('ko')
-      );
+      let korean = [];
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const all = await Speech.getAvailableVoicesAsync();
+        korean = all.filter((v) => (v.language || '').toLowerCase().startsWith('ko'));
+        if (korean.length > 0) break;
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
+      }
+
       setVoices(korean);
 
       // 저장해 둔 음성이 더 이상 폰에 없으면 기본 음성으로 되돌린다.
