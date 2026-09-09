@@ -16,7 +16,7 @@
         "monochromeImage": "./assets/android-icon-monochrome.png",
         "backgroundColor": "#5BAEAE"
       },
-      "package": "com.gaonpf.stepby",
+      "package": "com.stepby.app",
       "versionCode": 13,
       "permissions": [
         "android.permission.READ_MEDIA_AUDIO",
