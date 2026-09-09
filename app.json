@@ -2,7 +2,7 @@
   "expo": {
     "name": "스텝바이",
     "slug": "stepby",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -17,7 +17,7 @@
         "backgroundColor": "#5BAEAE"
       },
       "package": "com.gaonpf.stepby",
-      "versionCode": 12,
+      "versionCode": 13,
       "permissions": [
         "android.permission.READ_MEDIA_AUDIO",
         "android.permission.POST_NOTIFICATIONS"

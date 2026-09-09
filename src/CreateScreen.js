@@ -54,20 +54,20 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
 
   const chunkCount = useMemo(() => chunkText(text).length, [text]);
 
-  // 안드로이드 TTS 엔진은 시스템 서비스에 붙는 데 시간이 걸려서,
-  // 그 사이 getVoices() 를 부르면 조용히 빈 목록을 돌려줄 때가 있다(오류 아님).
-  // 비어 있으면 잠깐 두고 다시 물어본다.
+  // 음성 목록은 네이티브 모듈에서 직접 읽는다.
+  // expo-speech 는 엔진 초기화가 한 번 실패하면 내부 상태가 FAILED 로 굳어버려서,
+  // 앱을 완전히 껐다 켜기 전까지 새로고침을 눌러도 계속 빈 목록만 돌려준다.
+  // 네이티브 쪽은 실패하면 엔진을 버리고 새로 만들기 때문에 그 자리에서 복구된다.
   const loadVoices = useCallback(async () => {
     setLoadingVoices(true);
     try {
-      let korean = [];
+      const all = TtsFile
+        ? await TtsFile.listVoices()
+        : await Speech.getAvailableVoicesAsync();
 
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const all = await Speech.getAvailableVoicesAsync();
-        korean = all.filter((v) => (v.language || '').toLowerCase().startsWith('ko'));
-        if (korean.length > 0) break;
-        if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
-      }
+      const korean = all.filter((v) =>
+        (v.language || '').toLowerCase().startsWith('ko')
+      );
 
       setVoices(korean);
 
@@ -98,6 +98,18 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
         // 저장값이 깨졌으면 기본값으로 시작한다.
       }
       setReady(true);
+
+      // 시스템 TTS 서비스가 붙기 전에 expo-speech 가 먼저 엔진을 건드리면
+      // 그대로 FAILED 로 굳어서 읽기까지 막힌다.
+      // 복구 가능한 네이티브 엔진으로 먼저 깨워 둔 다음 목록을 읽는다.
+      if (TtsFile) {
+        try {
+          await TtsFile.prepareEngine();
+        } catch {
+          // 준비에 실패해도 목록 읽기 쪽에서 다시 시도한다.
+        }
+      }
+
       loadVoices();
     })();
 
@@ -166,7 +178,7 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
               type: 'error',
               message: e?.message
                 ? `읽기 실패 · ${e.message}`
-                : '읽지 못했습니다. 설정에서 다른 음성을 골라보세요.',
+                : '읽지 못했습니다. 다른 음성을 고르거나, 앱을 완전히 종료한 뒤 다시 열어보세요.',
             });
           },
         });
