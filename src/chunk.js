@@ -70,3 +70,45 @@ export function chunkText(input) {
   if (buf) chunks.push(buf);
   return chunks;
 }
+
+// 문장 끝 마침표는 TTS 가 알아서 쉬어 준다. 그런데 줄바꿈은 아무 흔적도 안 남는다 —
+// chunkText 가 줄을 공백으로 이어 붙여 한 덩어리로 만들기 때문에, 조문처럼 줄로
+// 구분해 놓은 글이 통째로 쭉 이어져 읽힌다.
+//
+// 그래서 읽을 때는 줄 단위로 끊어서 합성하고, 사이에 진짜 무음을 넣는다.
+// 줄 안의 문장들은 그대로 두는데(마침표가 이미 쉼표 역할을 한다), 그래야
+// 합성 호출 수가 쓸데없이 늘어나지 않는다.
+//
+// gap: 'para' = 빈 줄로 나뉜 문단 사이, 'line' = 그냥 줄바꿈, 'none' = 마지막
+export function segmentText(input) {
+  const text = (input || '').replace(/\r\n?/g, '\n').trim();
+  if (!text) return [];
+
+  const segments = [];
+
+  // 빈 줄(하나 이상)로 문단을 먼저 가른다.
+  const paragraphs = text.split(/\n[ \t]*\n+/);
+
+  paragraphs.forEach((para, pi) => {
+    const lines = para
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    lines.forEach((line, li) => {
+      const lastLine = li === lines.length - 1;
+      const lastPara = pi === paragraphs.length - 1;
+
+      for (const piece of hardSplit(line)) {
+        segments.push({ text: piece, gap: 'line' });
+      }
+
+      if (lastLine) {
+        // 문단 끝이면 더 길게 쉰다. 글 전체의 끝이면 쉴 필요가 없다.
+        segments[segments.length - 1].gap = lastPara ? 'none' : 'para';
+      }
+    });
+  });
+
+  return segments;
+}

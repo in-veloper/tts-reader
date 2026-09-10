@@ -14,7 +14,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Speech from 'expo-speech';
 
 import TtsFile from '../modules/tts-file';
-import { chunkText } from './chunk';
+import { segmentText } from './chunk';
 import { UNSORTED, addFolder } from './library';
 import { player } from './playback';
 import { colors, radius } from './theme';
@@ -31,11 +31,17 @@ import {
 const STORAGE_KEY = 'stepby/settings';
 const PREVIEW_TEXT = '안녕하세요. 이 목소리로 읽어 드릴게요.';
 
+// 줄바꿈·문단 사이에 두는 쉬는 시간. 저장 파일 쪽(TtsFileModule.kt)의 무음
+// 길이와 같은 느낌으로 맞춰 뒀다 — 실시간 읽기는 setTimeout, 파일은 실제 무음.
+const GAP_MS = { line: 350, para: 900, none: 0 };
+
 export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
   const [text, setText] = useState('');
   const [status, setStatus] = useState('idle'); // idle | playing | paused
   const [progress, setProgress] = useState({ index: 0, total: 0 });
 
+  const [engines, setEngines] = useState([]);
+  const [engine, setEngine] = useState(null); // null = 시스템 기본 엔진
   const [voices, setVoices] = useState([]);
   const [voice, setVoice] = useState(null);
   const [rate, setRate] = useState(1);
@@ -52,17 +58,59 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
   const chunksRef = useRef([]);
   const indexRef = useRef(0);
 
-  const chunkCount = useMemo(() => chunkText(text).length, [text]);
+  // 읽기는 네이티브 speak 이벤트로 한 구간씩 이어붙인다.
+  // utterance id 를 여기서 만들어 넘기고, 돌아온 이벤트의 id 가 지금 기다리는
+  // 것과 같을 때만 다음 구간으로 넘어간다 — 정지 직후 뒤늦게 오는 이벤트를 걸러낸다.
+  const speakIdRef = useRef(null);
+  const speakSeqRef = useRef(0);
+  const onDoneRef = useRef(null);
+  const onErrorRef = useRef(null);
+
+  // 줄바꿈·문단 사이는 구간을 다 읽은 뒤 잠깐 쉬었다 다음으로 넘어간다.
+  // 정지·일시정지를 누르면 이 대기도 같이 끊어야 한다.
+  const pauseTimerRef = useRef(null);
+  const clearPauseTimer = useCallback(() => {
+    if (pauseTimerRef.current) {
+      clearTimeout(pauseTimerRef.current);
+      pauseTimerRef.current = null;
+    }
+  }, []);
+
+  const chunkCount = useMemo(() => segmentText(text).length, [text]);
+
+  // 같은 한국어라도 네트워크 음성(구글 신경망)이 오프라인 음성보다 확실히 자연스럽다.
+  // 목록에 뒤섞여 "음성 3, 음성 7" 로만 뜨면 어느 게 좋은 건지 알 수가 없어서,
+  // 좋은 것부터 올리고 무엇인지 이름에 적어 준다.
+  const rankedVoices = useMemo(() => {
+    const score = (v) =>
+      (v.networkRequired ? 2 : 0) + (v.quality === 'Enhanced' ? 1 : 0);
+
+    const seen = { 고품질: 0, 오프라인: 0 };
+
+    return [...voices]
+      .sort((a, b) => score(b) - score(a))
+      .map((v) => {
+        const kind = v.networkRequired ? '고품질' : '오프라인';
+        seen[kind] += 1;
+        return {
+          ...v,
+          title: `${kind} 음성 ${seen[kind]}`,
+          note: v.networkRequired
+            ? '더 자연스러움 · 인터넷 필요'
+            : '인터넷 없이 동작',
+        };
+      });
+  }, [voices]);
 
   // 음성 목록은 네이티브 모듈에서 직접 읽는다.
   // expo-speech 는 엔진 초기화가 한 번 실패하면 내부 상태가 FAILED 로 굳어버려서,
   // 앱을 완전히 껐다 켜기 전까지 새로고침을 눌러도 계속 빈 목록만 돌려준다.
   // 네이티브 쪽은 실패하면 엔진을 버리고 새로 만들기 때문에 그 자리에서 복구된다.
-  const loadVoices = useCallback(async () => {
+  const loadVoices = useCallback(async (enginePkg) => {
     setLoadingVoices(true);
     try {
       const all = TtsFile
-        ? await TtsFile.listVoices()
+        ? await TtsFile.listVoices(enginePkg ?? null)
         : await Speech.getAvailableVoicesAsync();
 
       const korean = all.filter((v) =>
@@ -73,6 +121,7 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
 
       // 저장해 둔 음성이 더 이상 폰에 없으면 기본 음성으로 되돌린다.
       // 없는 음성을 지정한 채로 읽으면 아무 소리도 안 나고 조용히 끝난다.
+      // 엔진을 바꾼 직후에도 이 경로로 걸러진다 — 엔진마다 음성 이름이 다르다.
       setVoice((prev) =>
         prev && !korean.some((v) => v.identifier === prev) ? null : prev
       );
@@ -83,46 +132,70 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
     }
   }, []);
 
+  // 폰에 깔린 TTS 엔진 목록. 삼성 TTS 와 Google TTS 는 목소리가 완전히 달라서
+  // 어느 엔진을 쓰느냐가 음성 선택보다 품질에 더 크게 영향을 준다.
+  const loadEngines = useCallback(async () => {
+    if (!TtsFile) return;
+    try {
+      setEngines(await TtsFile.listEngines());
+    } catch {
+      setEngines([]);
+    }
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
         const raw = await AsyncStorage.getItem(STORAGE_KEY);
+        let startEngine = null;
         if (raw) {
           const saved = JSON.parse(raw);
+          if (saved.engine) {
+            startEngine = saved.engine;
+            setEngine(saved.engine);
+          }
           if (saved.voice) setVoice(saved.voice);
           if (typeof saved.rate === 'number') setRate(saved.rate);
           if (typeof saved.pitch === 'number') setPitch(saved.pitch);
           if (typeof saved.text === 'string') setText(saved.text);
         }
+        setReady(true);
+
+        // 시스템 TTS 서비스가 붙기 전에 expo-speech 가 먼저 엔진을 건드리면
+        // 그대로 FAILED 로 굳어서 읽기까지 막힌다.
+        // 복구 가능한 네이티브 엔진으로 먼저 깨워 둔 다음 목록을 읽는다.
+        if (TtsFile) {
+          try {
+            await TtsFile.prepareEngine(startEngine);
+          } catch {
+            // 준비에 실패해도 목록 읽기 쪽에서 다시 시도한다.
+          }
+        }
+
+        loadEngines();
+        loadVoices(startEngine);
       } catch {
         // 저장값이 깨졌으면 기본값으로 시작한다.
+        setReady(true);
+        loadEngines();
+        loadVoices(null);
       }
-      setReady(true);
-
-      // 시스템 TTS 서비스가 붙기 전에 expo-speech 가 먼저 엔진을 건드리면
-      // 그대로 FAILED 로 굳어서 읽기까지 막힌다.
-      // 복구 가능한 네이티브 엔진으로 먼저 깨워 둔 다음 목록을 읽는다.
-      if (TtsFile) {
-        try {
-          await TtsFile.prepareEngine();
-        } catch {
-          // 준비에 실패해도 목록 읽기 쪽에서 다시 시도한다.
-        }
-      }
-
-      loadVoices();
     })();
 
-    return () => Speech.stop();
-  }, [loadVoices]);
+    return () => {
+      clearPauseTimer();
+      Speech.stop();
+      TtsFile?.stopSpeaking().catch(() => {});
+    };
+  }, [loadVoices, loadEngines, clearPauseTimer]);
 
   useEffect(() => {
     if (!ready) return;
     AsyncStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ voice, rate, pitch, text })
+      JSON.stringify({ engine, voice, rate, pitch, text })
     ).catch(() => {});
-  }, [ready, voice, rate, pitch, text]);
+  }, [ready, engine, voice, rate, pitch, text]);
 
   useEffect(() => {
     if (!TtsFile) return undefined;
@@ -132,11 +205,40 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
     return () => sub.remove();
   }, []);
 
+  // 읽기 이벤트는 한 번만 붙여 두고, 실제로 할 일은 ref 로 갈아끼운다.
+  // 구간마다 구독을 새로 걸면 이벤트가 붙는 사이에 도착한 걸 놓친다.
+  useEffect(() => {
+    if (!TtsFile) return undefined;
+    const done = TtsFile.addListener('onSpeakDone', (e) => {
+      if (e?.id && e.id === speakIdRef.current) onDoneRef.current?.();
+    });
+    const failed = TtsFile.addListener('onSpeakError', (e) => {
+      if (e?.id && e.id === speakIdRef.current) onErrorRef.current?.();
+    });
+    return () => {
+      done.remove();
+      failed.remove();
+    };
+  }, []);
+
   // 진행 상황은 화면 가운데 오버레이에서 보여준다.
   useEffect(() => {
     if (!saving) return;
     onBusy({ text: '오디오로 만드는 중', progress: saving });
   }, [saving, onBusy]);
+
+  // 예전엔 expo-speech 로 읽었는데, 그건 시스템 기본 엔진만 쓴다.
+  // 그래서 삼성 음성을 골라 놔도 Google 목소리가 나왔다. 네이티브로 돌려서
+  // 고른 엔진 그대로 읽고, 파일로 굽는 결과와 들리는 소리를 일치시킨다.
+  const speakChunk = useCallback(
+    async (text_) => {
+      if (!TtsFile) throw new Error('이 빌드에서는 읽기를 쓸 수 없습니다.');
+      const id = `s${++speakSeqRef.current}`;
+      speakIdRef.current = id;
+      await TtsFile.speak(text_, id, engine, voice, rate, pitch);
+    },
+    [engine, voice, rate, pitch]
+  );
 
   const speakFrom = useCallback(
     (startIndex) => {
@@ -151,10 +253,25 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
         // 재생 중이 아니면 무시.
       }
 
+      const fail = (message) => {
+        if (session !== sessionRef.current) return;
+        clearPauseTimer();
+        speakIdRef.current = null;
+        setStatus('idle');
+        setProgress({ index: 0, total: 0 });
+        onToast({
+          type: 'error',
+          message:
+            message ||
+            '읽지 못했습니다. 다른 음성을 고르거나, 앱을 완전히 종료한 뒤 다시 열어보세요.',
+        });
+      };
+
       const step = (i) => {
         if (session !== sessionRef.current) return;
 
         if (i >= chunks.length) {
+          speakIdRef.current = null;
           indexRef.current = 0;
           setProgress({ index: 0, total: 0 });
           setStatus('idle');
@@ -164,44 +281,47 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
         indexRef.current = i;
         setProgress({ index: i, total: chunks.length });
 
-        Speech.speak(chunks[i], {
-          language: 'ko-KR',
-          voice: voice || undefined,
-          rate,
-          pitch,
-          onDone: () => step(i + 1),
-          onError: (e) => {
-            if (session !== sessionRef.current) return;
-            setStatus('idle');
-            setProgress({ index: 0, total: 0 });
-            onToast({
-              type: 'error',
-              message: e?.message
-                ? `읽기 실패 · ${e.message}`
-                : '읽지 못했습니다. 다른 음성을 고르거나, 앱을 완전히 종료한 뒤 다시 열어보세요.',
-            });
-          },
-        });
+        // 줄바꿈·문단으로 나뉜 구간 사이엔 실제로 쉬었다 다음 구간으로 넘어간다.
+        // 안 그러면 서로 다른 조문·문단이 공백 하나로 붙어 그대로 쭉 읽힌다.
+        onDoneRef.current = () => {
+          const wait = GAP_MS[chunks[i].gap] || 0;
+          if (wait > 0) {
+            pauseTimerRef.current = setTimeout(() => step(i + 1), wait);
+          } else {
+            step(i + 1);
+          }
+        };
+        onErrorRef.current = () => fail(null);
+
+        speakChunk(chunks[i].text).catch((e) =>
+          fail(e?.message ? `읽기 실패 · ${e.message}` : null)
+        );
       };
 
       setStatus('playing');
       step(startIndex);
     },
-    [voice, rate, pitch, onToast]
+    [speakChunk, onToast]
   );
 
   const handleStop = useCallback(() => {
     sessionRef.current += 1;
+    clearPauseTimer();
+    speakIdRef.current = null;
+    TtsFile?.stopSpeaking().catch(() => {});
     Speech.stop();
     indexRef.current = 0;
     setProgress({ index: 0, total: 0 });
     setStatus('idle');
-  }, []);
+  }, [clearPauseTimer]);
 
   // 안드로이드 TTS 는 진짜 일시정지가 없어서, 멈춘 뒤 현재 구간부터 다시 읽는다.
   const handleTogglePlay = useCallback(() => {
     if (status === 'playing') {
       sessionRef.current += 1;
+      clearPauseTimer();
+      speakIdRef.current = null;
+      TtsFile?.stopSpeaking().catch(() => {});
       Speech.stop();
       setStatus('paused');
       return;
@@ -212,35 +332,60 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
       return;
     }
 
-    const chunks = chunkText(text);
+    const chunks = segmentText(text);
     if (!chunks.length) return;
 
     chunksRef.current = chunks;
     indexRef.current = 0;
     speakFrom(0);
-  }, [status, text, speakFrom]);
+  }, [status, text, speakFrom, clearPauseTimer]);
 
   const previewVoice = useCallback(
-    (identifier) => {
+    (identifier, enginePkg = engine) => {
       sessionRef.current += 1;
-      Speech.stop();
       setStatus('idle');
-      Speech.speak(PREVIEW_TEXT, {
-        language: 'ko-KR',
-        voice: identifier || undefined,
-        rate,
-        pitch,
-      });
+      setProgress({ index: 0, total: 0 });
+
+      // 미리듣기는 이어읽기가 없으니 이벤트로 할 일이 없다.
+      onDoneRef.current = null;
+      onErrorRef.current = null;
+
+      if (!TtsFile) {
+        Speech.speak(PREVIEW_TEXT, {
+          language: 'ko-KR',
+          voice: identifier || undefined,
+          rate,
+          pitch,
+        });
+        return;
+      }
+
+      const id = `p${++speakSeqRef.current}`;
+      speakIdRef.current = id;
+      TtsFile.speak(PREVIEW_TEXT, id, enginePkg, identifier, rate, pitch).catch((e) =>
+        onToast({ type: 'error', message: e?.message || '미리듣기에 실패했습니다.' })
+      );
     },
-    [rate, pitch]
+    [engine, rate, pitch, onToast]
+  );
+
+  // 엔진을 바꾸면 목소리 목록 자체가 갈린다. 읽던 걸 멈추고 새로 읽어온다.
+  const selectEngine = useCallback(
+    (pkg) => {
+      handleStop();
+      setEngine(pkg);
+      setVoice(null);
+      loadVoices(pkg);
+    },
+    [handleStop, loadVoices]
   );
 
   const runSave = useCallback(
     async (folder) => {
       setFolderSheetOpen(false);
 
-      const chunks = chunkText(text);
-      if (!chunks.length) return;
+      const segments = segmentText(text);
+      if (!segments.length) return;
 
       if (!TtsFile) {
         onToast({ type: 'error', message: '이 빌드에서는 저장 기능을 쓸 수 없습니다.' });
@@ -248,14 +393,15 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
       }
 
       handleStop();
-      setSaving({ index: 0, total: chunks.length });
-      onBusy({ text: '오디오로 만드는 중', progress: { index: 0, total: chunks.length } });
+      setSaving({ index: 0, total: segments.length });
+      onBusy({ text: '오디오로 만드는 중', progress: { index: 0, total: segments.length } });
 
       try {
         if (folder && folder !== UNSORTED) await addFolder(folder);
 
         const result = await TtsFile.saveToFile(
-          chunks,
+          segments,
+          engine,
           voice,
           rate,
           pitch,
@@ -272,19 +418,22 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
         onBusy(null);
       }
     },
-    [text, voice, rate, pitch, handleStop, onToast, onBusy, onSaved]
+    [text, engine, voice, rate, pitch, handleStop, onToast, onBusy, onSaved]
   );
 
   const playing = status === 'playing';
   const busy = Boolean(saving);
-  const voiceIndex = voices.findIndex((v) => v.identifier === voice);
-  const voiceName = voiceIndex < 0 ? '기본 음성' : `음성 ${voiceIndex + 1}`;
+  const voiceName =
+    rankedVoices.find((v) => v.identifier === voice)?.title || '기본 음성';
+  const engineLabel =
+    engines.find((e) => e.packageName === engine)?.label ||
+    (engine ? engine : '기본 엔진');
 
   return (
     <View style={styles.root}>
       <View style={styles.toolbar}>
         <Text style={styles.toolbarText} numberOfLines={1}>
-          {voiceName} · 속도 {rate.toFixed(2)}x
+          {engineLabel} · {voiceName} · 속도 {rate.toFixed(2)}x
         </Text>
         <Pressable
           onPress={() => setSettingsOpen(true)}
@@ -401,7 +550,30 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
 
       <Sheet visible={settingsOpen} title="목소리" onClose={() => setSettingsOpen(false)}>
         <ScrollView showsVerticalScrollIndicator={false}>
-          <Label>음성</Label>
+          {engines.length > 1 && (
+            <>
+              <Label>엔진</Label>
+              <Text style={styles.hint}>
+                엔진마다 목소리가 완전히 다릅니다. 음성보다 이쪽이 더 크게 바뀝니다.
+              </Text>
+              <View style={styles.voiceList}>
+                {engines.map((e) => (
+                  <VoiceRow
+                    key={e.packageName}
+                    name={e.label}
+                    sub={e.isSystemDefault ? '폰 기본 엔진' : e.packageName}
+                    active={engine === e.packageName}
+                    onSelect={() => selectEngine(e.packageName)}
+                    onPreview={() => previewVoice(null, e.packageName)}
+                  />
+                ))}
+              </View>
+            </>
+          )}
+
+          <Label style={engines.length > 1 ? styles.sectionLabel : undefined}>
+            음성
+          </Label>
           <View style={styles.voiceList}>
             {loadingVoices ? (
               <ActivityIndicator style={styles.loader} color={colors.accentSoft} />
@@ -411,7 +583,7 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
                   폰에 설치된 한국어 음성을 찾지 못했습니다. 설정 › 접근성 › 텍스트
                   음성 변환에서 한국어 음성을 내려받은 뒤 새로고침하세요.
                 </Text>
-                <Pressable onPress={loadVoices} style={styles.reload}>
+                <Pressable onPress={() => loadVoices(engine)} style={styles.reload}>
                   <Text style={styles.reloadText}>새로고침</Text>
                 </Pressable>
               </View>
@@ -424,11 +596,11 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
                   onSelect={() => setVoice(null)}
                   onPreview={() => previewVoice(null)}
                 />
-                {voices.map((v, i) => (
+                {rankedVoices.map((v) => (
                   <VoiceRow
                     key={v.identifier}
-                    name={`음성 ${i + 1}`}
-                    sub={v.identifier}
+                    name={v.title}
+                    sub={v.note}
                     active={voice === v.identifier}
                     onSelect={() => setVoice(v.identifier)}
                     onPreview={() => previewVoice(v.identifier)}
@@ -578,6 +750,7 @@ const styles = StyleSheet.create({
   },
 
   sectionLabel: { marginTop: 24 },
+  hint: { color: colors.textFaint, fontSize: 12, lineHeight: 18, marginTop: 6 },
   folderList: { marginTop: 10, gap: 8 },
   folderRow: {
     flexDirection: 'row',

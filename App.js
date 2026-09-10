@@ -134,7 +134,16 @@ export default function App() {
         style={styles.flex}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
-        <Pressable style={styles.screen} onPress={Keyboard.dismiss} accessible={false}>
+        {/* 예전엔 이 Pressable 이 화면 전체를 감싸고 있었는데, 그러면 안쪽 목록·본문의
+            스크롤 드래그까지 먼저 가로채서 손가락 스크롤이 막힌다(메멘토에서 실제로 겪음).
+            내용 뒤에 배경으로만 깔아 두면, 빈 곳 탭은 그대로 키보드를 닫고
+            내용 위 제스처는 방해하지 않는다. */}
+        <View style={styles.screen}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={Keyboard.dismiss}
+            accessible={false}
+          />
           <View style={styles.header}>
             <View>
               <Text style={styles.brand}>스텝바이</Text>
@@ -186,7 +195,7 @@ export default function App() {
               }}
             />
           </View>
-        </Pressable>
+        </View>
       </KeyboardAvoidingView>
 
       <PlayerSheet
