@@ -41,8 +41,9 @@ yarn-error.*
 /android
 
 # 네이티브 빌드 산출물 (경로가 길어 윈도우에서 git 이 실패한다)
-android/
-ios/
+# 주의: 여기에 슬래시 없는 `android/` 를 두면 안 된다. 그러면 모든 깊이의
+# android 디렉터리에 걸려서 modules/*/android/ 의 코틀린 소스까지 통째로
+# 무시된다 — 루트의 생성 폴더는 위쪽 `/android` 가 이미 처리하고 있다.
 **/android/build/
 **/android/.cxx/
 **/.gradle/
