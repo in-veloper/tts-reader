@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { Asset } from 'expo-asset';
 import {
   createAudioPlayer,
   requestNotificationPermissionsAsync,
@@ -6,6 +7,7 @@ import {
 } from 'expo-audio';
 
 import { displayName } from './library';
+import PlayerWidget from '../modules/player-widget';
 
 export const RATES = [1, 1.25, 1.5, 1.75, 2];
 export const REPEAT_MODES = [
@@ -53,12 +55,39 @@ export async function preparePlayback() {
   }
 }
 
-function applyLockScreen(item) {
+// 삼성 미디어 위젯·잠금화면은 앨범 아트에서 뽑은 색으로 스스로 물든다.
+// 아트를 안 주면 재생 파일마다 제각각 색이 나오는데(보라 계열로 자주 떨어짐),
+// 우리 쪽에서 고정된 이미지를 하나 줘서 항상 같은 차분한 톤이 나오게 한다.
+// require() 는 번들 안의 자산을 가리킬 뿐이고, 기기에서 실제로 읽을 수 있는
+// file:// 경로로 바꾸려면 expo-asset 으로 한 번 내려받아야(캐시로 복사) 한다.
+let artworkUriPromise = null;
+function resolveArtworkUri() {
+  if (!artworkUriPromise) {
+    artworkUriPromise = (async () => {
+      try {
+        const asset = Asset.fromModule(require('../assets/artwork.png'));
+        await asset.downloadAsync();
+        return asset.localUri || asset.uri || null;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return artworkUriPromise;
+}
+
+async function applyLockScreen(item) {
   if (!item) return;
   try {
+    const artworkUrl = await resolveArtworkUri();
     player.setActiveForLockScreen(
       true,
-      { title: displayName(item.name), artist: item.folder, albumTitle: '스텝바이' },
+      {
+        title: displayName(item.name),
+        artist: item.folder,
+        albumTitle: '스텝바이',
+        ...(artworkUrl ? { artworkUrl } : {}),
+      },
       { showSeekForward: true, showSeekBackward: true }
     );
   } catch {
@@ -81,12 +110,43 @@ function load(index, startPosition = 0) {
   emit({ index, track: item });
 }
 
+// 홈/잠금화면 위젯은 지금 재생 중인 게 뭔지 스스로 알 방법이 없다 — 제목·재생
+// 여부가 바뀔 때마다 여기서 밀어 준다. 위치(currentTime) 는 0.5초마다 바뀌므로
+// 매번 보내면 위젯을 쓸데없이 자주 다시 그리게 된다. 제목+재생 여부만 바뀔
+// 때만 보낸다.
+let lastWidgetKey = null;
+function pushWidgetState(playing) {
+  if (!PlayerWidget) return;
+
+  const track = state.track;
+  const key = `${track?.id || ''}|${playing}`;
+  if (key === lastWidgetKey) return;
+  lastWidgetKey = key;
+
+  PlayerWidget.update(
+    track ? displayName(track.name) : null,
+    track?.folder || null,
+    !!playing
+  );
+}
+
+// 위젯 버튼(재생/이전/다음)은 여기로 들어온다. 앱이 완전히 꺼져 있으면 이
+// 리스너 자체가 없으니(=JS 가 안 떠 있으니) 위젯 쪽에서 대신 앱을 연다 —
+// 백그라운드 재생 중일 때만 이 경로가 실제로 쓰인다.
+PlayerWidget?.addListener('onWidgetAction', (e) => {
+  if (e?.action === 'toggle') togglePlay();
+  else if (e?.action === 'next') next();
+  else if (e?.action === 'previous') previous();
+});
+
 player.addListener('playbackStatusUpdate', (status) => {
   if (pendingSeek != null && status.isLoaded) {
     const target = pendingSeek;
     pendingSeek = null;
     player.seekTo(target);
   }
+
+  pushWidgetState(status.playing);
 
   // loop 이 켜져 있으면(한 곡 반복) didJustFinish 는 오지 않는다.
   if (status.didJustFinish) advance();
@@ -128,6 +188,7 @@ export function pruneQueue(validIds) {
       // 잠금화면에 올라가 있지 않았으면 무시.
     }
     emit({ queue: [], index: -1, track: null });
+    pushWidgetState(false);
     return;
   }
 
