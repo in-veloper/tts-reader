@@ -1,0 +1,19 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    memento/autoconnect 위젯과 같은 이유로 여기 둔다 — 앱 매니페스트는 prebuild 가
+    app.json 으로 다시 만들기 때문에 직접 넣으면 다음 prebuild 때 사라진다.
+  -->
+  <application>
+    <receiver
+      android:name="expo.modules.playerwidget.PlayerWidgetProvider"
+      android:exported="true"
+      android:label="@string/player_widget_label">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+      </intent-filter>
+      <meta-data
+        android:name="android.appwidget.provider"
+        android:resource="@xml/player_widget_info" />
+    </receiver>
+  </application>
+</manifest>

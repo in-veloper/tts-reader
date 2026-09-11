@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 한 곡 반복일 때 반복 아이콘 옆에 붙는 작은 "1" 배지 배경. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+  android:shape="oval">
+  <solid android:color="#0D9488" />
+</shape>

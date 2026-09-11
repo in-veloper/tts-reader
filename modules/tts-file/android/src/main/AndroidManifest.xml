@@ -1,0 +1,15 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    안드로이드 11부터는 다른 앱이 기본적으로 안 보인다. 이 선언이 없으면
+    TextToSpeech.getEngines() 가 삼성 TTS 같은 다른 엔진을 아예 못 찾아서
+    시스템 기본 엔진 하나만 돌려준다 (앱에서 엔진 선택이 안 뜬다).
+
+    앱 매니페스트는 prebuild 가 app.json 으로 다시 만들기 때문에 여기 둔다 —
+    라이브러리 매니페스트는 빌드할 때 앱 매니페스트로 병합된다.
+  -->
+  <queries>
+    <intent>
+      <action android:name="android.intent.action.TTS_SERVICE" />
+    </intent>
+  </queries>
+</manifest>

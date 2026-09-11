@@ -33,7 +33,7 @@ const PREVIEW_TEXT = '안녕하세요. 이 목소리로 읽어 드릴게요.';
 
 // 줄바꿈·문단 사이에 두는 쉬는 시간. 저장 파일 쪽(TtsFileModule.kt)의 무음
 // 길이와 같은 느낌으로 맞춰 뒀다 — 실시간 읽기는 setTimeout, 파일은 실제 무음.
-const GAP_MS = { line: 350, para: 900, none: 0 };
+const GAP_MS = { clause: 120, sentence: 220, line: 350, para: 900, none: 0 };
 
 export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
   const [text, setText] = useState('');

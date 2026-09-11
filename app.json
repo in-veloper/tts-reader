@@ -2,7 +2,8 @@
   "expo": {
     "name": "스텝바이",
     "slug": "stepby",
-    "version": "1.6.3",
+    "version": "1.6.8",
+    "scheme": "stepby",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -18,7 +19,7 @@
         "backgroundColor": "#5BAEAE"
       },
       "package": "com.stepby.app",
-      "versionCode": 23,
+      "versionCode": 28,
       "permissions": [
         "android.permission.READ_MEDIA_AUDIO",
         "android.permission.POST_NOTIFICATIONS"

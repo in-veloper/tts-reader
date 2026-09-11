@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Keyboard,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   SafeAreaView,
@@ -23,7 +24,7 @@ import {
   loadLibrary,
   savePosition,
 } from './src/library';
-import { playQueue, player, pruneQueue, usePlayback } from './src/playback';
+import { playQueue, player, pruneQueue, resumeFromWidget, usePlayback } from './src/playback';
 import { colors, radius } from './src/theme';
 import { Overlay, Toast } from './src/ui';
 
@@ -68,6 +69,22 @@ export default function App() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // 잠금화면 위젯을 눌렀는데 앱(JS)이 완전히 꺼져 있었으면 위젯이
+  // stepby://widget?action=... 링크로 앱을 연다 — 그 신호를 받아서 마지막으로
+  // 듣던 걸 이어 튼다. 앱을 그냥 아이콘으로 직접 열었을 때는 이 링크가 없으니
+  // 평소처럼 조용히 뜬다.
+  useEffect(() => {
+    const handleUrl = (url) => {
+      if (!url || !url.includes('widget')) return;
+      const action = /action=([a-z]+)/.exec(url)?.[1] || 'toggle';
+      resumeFromWidget(action);
+    };
+
+    Linking.getInitialURL().then(handleUrl);
+    const sub = Linking.addEventListener('url', ({ url }) => handleUrl(url));
+    return () => sub.remove();
+  }, []);
 
   // 들은 위치를 주기적으로 남기고, 85% 를 넘기면 재생 횟수를 한 번 올린다.
   useEffect(() => {

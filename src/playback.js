@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Asset } from 'expo-asset';
 import {
   createAudioPlayer,
@@ -6,8 +7,10 @@ import {
   setAudioModeAsync,
 } from 'expo-audio';
 
-import { displayName } from './library';
+import { displayName, loadLibrary } from './library';
 import PlayerWidget from '../modules/player-widget';
+
+const LAST_PLAY_KEY = 'stepby/lastPlay';
 
 export const RATES = [1, 1.25, 1.5, 1.75, 2];
 export const REPEAT_MODES = [
@@ -95,6 +98,24 @@ async function applyLockScreen(item) {
   }
 }
 
+// 앱이 완전히 꺼진 뒤 위젯에서 재생을 걸면(resumeFromWidget) 무엇을 어디서부터
+// 이어 틀지 알아야 한다 — 큐/인덱스는 메모리에만 있어서 그대로는 못 쓰니,
+// 바뀔 때마다 아이디 목록 + 지금 듣던 아이디 + 반복 모드만 가볍게 저장해 둔다.
+// 실제 이어듣기 위치(초)는 이미 library.js 의 savePosition() 이 곡별로 저장하고
+// 있으므로 여기서 다시 저장할 필요는 없다.
+function persistLastPlay() {
+  const track = state.queue[state.index];
+  if (!track) return;
+  AsyncStorage.setItem(
+    LAST_PLAY_KEY,
+    JSON.stringify({
+      ids: state.queue.map((item) => item.id),
+      currentId: track.id,
+      repeatIndex: state.repeatIndex,
+    })
+  ).catch(() => {});
+}
+
 function load(index, startPosition = 0) {
   const item = state.queue[index];
   if (!item) return;
@@ -108,25 +129,28 @@ function load(index, startPosition = 0) {
 
   applyLockScreen(item);
   emit({ index, track: item });
+  persistLastPlay();
 }
 
 // 홈/잠금화면 위젯은 지금 재생 중인 게 뭔지 스스로 알 방법이 없다 — 제목·재생
-// 여부가 바뀔 때마다 여기서 밀어 준다. 위치(currentTime) 는 0.5초마다 바뀌므로
-// 매번 보내면 위젯을 쓸데없이 자주 다시 그리게 된다. 제목+재생 여부만 바뀔
-// 때만 보낸다.
+// 여부·반복 모드가 바뀔 때마다 여기서 밀어 준다. 위치(currentTime) 는 0.5초마다
+// 바뀌므로 매번 보내면 위젯을 쓸데없이 자주 다시 그리게 된다. 이 셋 중 하나라도
+// 바뀔 때만 보낸다.
 let lastWidgetKey = null;
 function pushWidgetState(playing) {
   if (!PlayerWidget) return;
 
   const track = state.track;
-  const key = `${track?.id || ''}|${playing}`;
+  const repeatMode = REPEAT_MODES[state.repeatIndex].mode;
+  const key = `${track?.id || ''}|${playing}|${repeatMode}`;
   if (key === lastWidgetKey) return;
   lastWidgetKey = key;
 
   PlayerWidget.update(
     track ? displayName(track.name) : null,
     track?.folder || null,
-    !!playing
+    !!playing,
+    repeatMode
   );
 }
 
@@ -168,6 +192,33 @@ export async function playQueue(items, index, startPosition = 0) {
   await preparePlayback();
   emit({ queue: items });
   load(index, startPosition);
+}
+
+// 위젯에서 잠금화면인 채로 재생 버튼을 눌렀는데 앱(JS)이 완전히 꺼져 있었을 때
+// App.js 가 딥링크(stepby://widget)로 받아서 부른다. 마지막으로 듣던 큐를
+// 아이디로 다시 찾아 복원하고, 저장돼 있던 위치(library.js 의 savePosition)
+// 부터 이어 튼다.
+export async function resumeFromWidget(action) {
+  try {
+    const raw = await AsyncStorage.getItem(LAST_PLAY_KEY);
+    if (!raw) return;
+    const last = JSON.parse(raw);
+    if (!last?.ids?.length) return;
+
+    const { items } = await loadLibrary();
+    const byId = new Map(items.map((item) => [item.id, item]));
+    const queue = last.ids.map((id) => byId.get(id)).filter(Boolean);
+    if (!queue.length) return;
+
+    const index = Math.max(0, queue.findIndex((item) => item.id === last.currentId));
+    emit({ repeatIndex: last.repeatIndex ?? state.repeatIndex });
+    await playQueue(queue, index, queue[index]?.position || 0);
+
+    if (action === 'next') next();
+    else if (action === 'previous') previous();
+  } catch {
+    // 복원에 실패해도 앱 자체는 열린 상태이니 사용자가 직접 고르면 된다.
+  }
 }
 
 // 서재에서 파일을 지우면 큐에 남은 유령 항목을 걷어낸다.
@@ -234,6 +285,8 @@ export function cycleRepeat() {
   const repeatIndex = (state.repeatIndex + 1) % REPEAT_MODES.length;
   emit({ repeatIndex });
   player.loop = REPEAT_MODES[repeatIndex].mode === 'single';
+  pushWidgetState(player.playing);
+  persistLastPlay();
 }
 
 export function formatSeconds(seconds) {
