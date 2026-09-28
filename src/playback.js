@@ -7,7 +7,7 @@ import {
   setAudioModeAsync,
 } from 'expo-audio';
 
-import { displayName, loadLibrary } from './library';
+import { displayName, ensureAudioPermission, loadLibrary } from './library';
 import PlayerWidget from '../modules/player-widget';
 
 const LAST_PLAY_KEY = 'stepby/lastPlay';
@@ -15,8 +15,8 @@ const LAST_PLAY_KEY = 'stepby/lastPlay';
 export const RATES = [1, 1.25, 1.5, 1.75, 2];
 export const REPEAT_MODES = [
   { mode: 'none', icon: 'arrow-forward', label: '반복 없음' },
-  { mode: 'all', icon: 'repeat', label: '전체 반복' },
   { mode: 'single', icon: 'reload', label: '한 곡 반복' },
+  { mode: 'all', icon: 'repeat', label: '전체 반복' },
 ];
 
 export const player = createAudioPlayer(null, { updateInterval: 500 });
@@ -161,6 +161,7 @@ PlayerWidget?.addListener('onWidgetAction', (e) => {
   if (e?.action === 'toggle') togglePlay();
   else if (e?.action === 'next') next();
   else if (e?.action === 'previous') previous();
+  else if (e?.action === 'repeat') cycleRepeat();
 });
 
 player.addListener('playbackStatusUpdate', (status) => {
@@ -194,10 +195,19 @@ export async function playQueue(items, index, startPosition = 0) {
   load(index, startPosition);
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // 위젯에서 잠금화면인 채로 재생 버튼을 눌렀는데 앱(JS)이 완전히 꺼져 있었을 때
 // App.js 가 딥링크(stepby://widget)로 받아서 부른다. 마지막으로 듣던 큐를
 // 아이디로 다시 찾아 복원하고, 저장돼 있던 위치(library.js 의 savePosition)
 // 부터 이어 튼다.
+//
+// 진짜 콜드부트(프로세스가 막 새로 뜬 직후)에는 네이티브 모듈/권한이 아직
+// 완전히 준비되기 전이라 listLibrary() 가 가끔 빈 목록을 돌려주는 순간이
+// 있었다 — "위젯에서 재생이 안 될 때가 있다"는 게 바로 이 타이밍 문제였다.
+// 권한을 먼저 확인하고, 목록이 비어 있으면 한 번 더 시도한다.
 export async function resumeFromWidget(action) {
   try {
     const raw = await AsyncStorage.getItem(LAST_PLAY_KEY);
@@ -205,7 +215,14 @@ export async function resumeFromWidget(action) {
     const last = JSON.parse(raw);
     if (!last?.ids?.length) return;
 
-    const { items } = await loadLibrary();
+    await ensureAudioPermission();
+
+    let items = (await loadLibrary()).items;
+    if (!items.length) {
+      await wait(400);
+      items = (await loadLibrary()).items;
+    }
+
     const byId = new Map(items.map((item) => [item.id, item]));
     const queue = last.ids.map((id) => byId.get(id)).filter(Boolean);
     if (!queue.length) return;
@@ -216,6 +233,7 @@ export async function resumeFromWidget(action) {
 
     if (action === 'next') next();
     else if (action === 'previous') previous();
+    else if (action === 'repeat') cycleRepeat();
   } catch {
     // 복원에 실패해도 앱 자체는 열린 상태이니 사용자가 직접 고르면 된다.
   }
