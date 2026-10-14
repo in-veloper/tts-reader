@@ -24,22 +24,29 @@ import expo.modules.kotlin.records.Record
 import java.io.Closeable
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-private const val WAV_HEADER_SIZE = 44
 private const val ROOT_FOLDER = "Music/스텝바이"
 private const val AAC_BITRATE = 64000
 private const val CODEC_TIMEOUT_US = 10_000L
 
-// 쉼표·문장·줄·문단 사이에 넣는 실제 무음 길이. 짧게 잡으면 여전히 다 붙어
-// 들리고, 너무 길면 문장 사이가 늘어져 답답하다.
-private const val CLAUSE_PAUSE_SEC = 0.12
-private const val SENTENCE_PAUSE_SEC = 0.22
-private const val LINE_PAUSE_SEC = 0.35
+// 조각 사이에 넣는 실제 무음 길이. 저장은 줄 단위로 통째 합성하고(segmentForSave),
+// 조각마다 엔진이 앞뒤에 붙이는 들쭉날쭉한 무음은 잘라낸 뒤 이 값으로 다시 채운다 —
+// 그래야 줄·문단 사이 쉼이 일정하다. SENTENCE 는 한 줄이 엔진 한도를 넘어
+// 문장 경계에서 나눴을 때만 쓰인다.
+private const val CLAUSE_PAUSE_SEC = 0.15
+private const val SENTENCE_PAUSE_SEC = 0.35
+private const val LINE_PAUSE_SEC = 0.5
 private const val PARAGRAPH_PAUSE_SEC = 0.9
+
+// 엔진이 만든 조각 앞뒤의 무음을 자를 때, 말소리로 볼 최소 크기(16비트 기준 약 -42dB)와
+// 말소리 앞뒤로 남겨 둘 여유. ㅅ·ㅎ 같은 약한 첫소리나 끝음절 꼬리가 잘리지 않게 넉넉히 남긴다.
+private const val SPEECH_THRESHOLD = 260
+private const val KEEP_BEFORE_MS = 60
+private const val KEEP_AFTER_MS = 120
+private const val FADE_MS = 6
 
 // saveToFile 은 이미 인자 7개(+ Promise) 로 expo-modules-core 가 지원하는
 // AsyncFunction 최대 개수를 다 쓰고 있다. texts/gaps 를 따로 받으면 8개가 되어
@@ -394,11 +401,10 @@ class TtsFileModule : Module() {
     rate: Float,
     pitch: Float,
     dir: File
-  ): List<File> {
+  ): List<AudioPart> {
     applyVoice(tts, voiceId, rate, pitch)
 
-    val parts = mutableListOf<File>()
-    var format: Pair<Int, Int>? = null // channels to sampleRate, 엔진이 처음 만든 파일 기준
+    val parts = mutableListOf<AudioPart>()
 
     segments.forEachIndexed { index, segment ->
       val text = segment.text
@@ -436,14 +442,12 @@ class TtsFileModule : Module() {
         throw CodedException("${index + 1}번째 구간 합성에 실패했습니다.")
       }
 
-      if (format == null) format = readWavFormat(target)
-      parts.add(target)
+      parts.add(AudioPart.Speech(target))
 
       sendEvent("onProgress", bundleOf("index" to index + 1, "total" to segments.size))
 
-      // 문장·줄바꿈·문단 구분을 실제 무음으로 살려 둔다. 안 그러면 여러 문장·줄로
-      // 나눠 놓은 조문이 공백 하나로 이어 붙어 통째로 쭉 읽힌다 — CreateScreen 의
-      // 읽기 경로도 같은 문제라 segmentText 에서 함께 고쳤다.
+      // 줄바꿈·문단 구분을 실제 무음으로 살려 둔다. 안 그러면 여러 줄로 나눠 놓은
+      // 조문이 이어 붙어 통째로 쭉 읽힌다.
       val seconds = when (segment.gap) {
         "para" -> PARAGRAPH_PAUSE_SEC
         "line" -> LINE_PAUSE_SEC
@@ -451,68 +455,19 @@ class TtsFileModule : Module() {
         "clause" -> CLAUSE_PAUSE_SEC
         else -> 0.0
       }
-      if (seconds > 0.0) {
-        val (channels, sampleRate) = format!!
-        val silence = File(dir, "silence_$index.wav")
-        writeSilenceWav(silence, channels, sampleRate, seconds)
-        parts.add(silence)
-      }
+      if (seconds > 0.0) parts.add(AudioPart.Silence(seconds))
     }
 
     return parts
   }
 
-  private fun readWavFormat(file: File): Pair<Int, Int> {
-    val header = ByteArray(WAV_HEADER_SIZE)
-    FileInputStream(file).use { it.read(header) }
-    val channels = readLittleEndian(header, 22, 2).toInt().coerceAtLeast(1)
-    val sampleRate = readLittleEndian(header, 24, 4).toInt().coerceAtLeast(8000)
-    return channels to sampleRate
-  }
-
-  // 무음도 다른 조각들과 똑같은 표준 44바이트 헤더 + PCM16 형식으로 만든다.
-  // 형식이 다르면 PcmReader 가 헤더 크기를 잘못 건너뛰어 잡음이 섞인다.
-  private fun writeSilenceWav(target: File, channels: Int, sampleRate: Int, seconds: Double) {
-    val bytesPerSample = 2
-    val blockAlign = bytesPerSample * channels
-    val byteRate = sampleRate * blockAlign
-    val dataSize = (sampleRate * blockAlign * seconds).toInt()
-
-    val header = ByteArray(WAV_HEADER_SIZE)
-    fun ascii(offset: Int, s: String) = s.forEachIndexed { i, c -> header[offset + i] = c.code.toByte() }
-    fun le(offset: Int, value: Int, size: Int) {
-      for (i in 0 until size) header[offset + i] = ((value shr (8 * i)) and 0xFF).toByte()
-    }
-
-    ascii(0, "RIFF")
-    le(4, 36 + dataSize, 4)
-    ascii(8, "WAVE")
-    ascii(12, "fmt ")
-    le(16, 16, 4)
-    le(20, 1, 2) // PCM
-    le(22, channels, 2)
-    le(24, sampleRate, 4)
-    le(28, byteRate, 4)
-    le(32, blockAlign, 2)
-    le(34, bytesPerSample * 8, 2)
-    ascii(36, "data")
-    le(40, dataSize, 4)
-
-    FileOutputStream(target).use { out ->
-      out.write(header)
-      val zeros = ByteArray(8192)
-      var remaining = dataSize
-      while (remaining > 0) {
-        val n = minOf(zeros.size, remaining)
-        out.write(zeros, 0, n)
-        remaining -= n
-      }
-    }
-  }
-
   // WAV 조각들을 이어 읽어 AAC 로 인코딩한다. WAV 대비 용량이 10분의 1 수준이 된다.
-  private fun encodeToM4a(parts: List<File>, target: File) {
-    val (channels, sampleRate) = readWavFormat(parts[0])
+  private fun encodeToM4a(parts: List<AudioPart>, target: File) {
+    val first = parts.firstNotNullOfOrNull { it as? AudioPart.Speech }
+      ?: throw CodedException("합성된 음성이 없습니다.")
+    val wav = WavInfo.read(first.file.readBytes())
+    val channels = wav.channels
+    val sampleRate = wav.sampleRate
 
     val format = MediaFormat.createAudioFormat(
       MediaFormat.MIMETYPE_AUDIO_AAC,
@@ -684,21 +639,65 @@ class TtsFileModule : Module() {
     return items
   }
 
-  private fun readLittleEndian(buffer: ByteArray, offset: Int, size: Int): Long {
-    var value = 0L
-    for (i in 0 until size) {
-      value = value or ((buffer[offset + i].toLong() and 0xFF) shl (8 * i))
-    }
-    return value
+  // 이어붙일 오디오 조각. 무음은 파일로 만들지 않고 읽을 때 바로 0 으로 채운다.
+  sealed class AudioPart {
+    class Speech(val file: File) : AudioPart()
+    class Silence(val seconds: Double) : AudioPart()
   }
 
-  // WAV 조각들을 헤더만 건너뛰며 하나의 PCM 스트림처럼 읽는다.
-  // 조각마다 실제 WAV 헤더를 읽어 target(channels/sampleRate) 과 다르면 맞춰
-  // 준다 — 문장 단위로 쪼개다 보니 짧은 문장에서 엔진이 다른 샘플레이트로
-  // 합성해 버리는 경우가 있는데, 그걸 그냥 원본 그대로 믿고 이어붙이면
-  // 그 구간만 엉뚱한 속도로(엄청 빠르고 깨진 소리로) 재생된다.
+  // WAV 를 청크 단위로 읽는다. 헤더를 44바이트로 가정하면, 엔진이 LIST 같은 청크를
+  // 덧붙인 파일에서 헤더 일부를 소리로 읽어 조각 머리마다 "틱" 하고 씹히는 소리가 난다.
+  class WavInfo(
+    val channels: Int,
+    val sampleRate: Int,
+    val bitsPerSample: Int,
+    val dataOffset: Int,
+    val dataSize: Int
+  ) {
+    companion object {
+      fun read(bytes: ByteArray): WavInfo {
+        fun le(offset: Int, size: Int): Int {
+          var v = 0
+          for (i in 0 until size) v = v or ((bytes[offset + i].toInt() and 0xFF) shl (8 * i))
+          return v
+        }
+        fun id(offset: Int) = String(bytes, offset, 4, Charsets.US_ASCII)
+
+        if (bytes.size < 12 || id(0) != "RIFF" || id(8) != "WAVE") {
+          throw CodedException("엔진이 만든 오디오 형식을 읽지 못했습니다.")
+        }
+
+        var channels = 1
+        var sampleRate = 0
+        var bits = 16
+        var pos = 12
+        while (pos + 8 <= bytes.size) {
+          val chunkId = id(pos)
+          val size = le(pos + 4, 4)
+          val body = pos + 8
+          if (chunkId == "fmt ") {
+            channels = le(body + 2, 2).coerceAtLeast(1)
+            sampleRate = le(body + 4, 4)
+            bits = le(body + 14, 2)
+          } else if (chunkId == "data") {
+            // 크기가 비었거나(스트리밍 중 기록) 파일보다 크면 파일 끝까지를 소리로 본다
+            val available = bytes.size - body
+            val dataSize = if (size <= 0 || size > available) available else size
+            return WavInfo(channels, sampleRate.coerceAtLeast(8000), bits, body, dataSize)
+          }
+          pos = body + size + (size and 1) // 청크는 짝수 바이트로 정렬된다
+        }
+        throw CodedException("엔진이 만든 오디오에 소리 데이터가 없습니다.")
+      }
+    }
+  }
+
+  // 조각들을 하나의 PCM16 스트림처럼 읽는다.
+  // 조각마다 실제 형식을 읽어 target(channels/sampleRate) 과 다르면 맞춰
+  // 준다 — 짧은 조각에서 엔진이 다른 샘플레이트로 합성해 버리는 경우가 있는데,
+  // 그걸 그냥 이어붙이면 그 구간만 엉뚱한 속도로 재생된다.
   private class PcmReader(
-    private val parts: List<File>,
+    private val parts: List<AudioPart>,
     private val targetChannels: Int,
     private val targetSampleRate: Int
   ) : Closeable {
@@ -726,30 +725,90 @@ class TtsFileModule : Module() {
       }
     }
 
-    private fun loadPart(file: File): ByteArray {
-      val bytes = file.readBytes()
-      val channels = readLE(bytes, 22, 2)
-      val sampleRate = readLE(bytes, 24, 4)
-      var pcm = bytes.copyOfRange(WAV_HEADER_SIZE, bytes.size)
+    private fun loadPart(part: AudioPart): ByteArray {
+      if (part is AudioPart.Silence) {
+        val frames = (targetSampleRate * part.seconds).toInt()
+        return ByteArray(frames * 2 * targetChannels)
+      }
 
-      if (channels != targetChannels) {
-        pcm = convertChannels(pcm, channels, targetChannels)
+      val bytes = (part as AudioPart.Speech).file.readBytes()
+      val wav = WavInfo.read(bytes)
+      var pcm = toPcm16(bytes, wav)
+
+      if (wav.channels != targetChannels) {
+        pcm = convertChannels(pcm, wav.channels, targetChannels)
       }
-      if (sampleRate != targetSampleRate) {
-        pcm = resample(pcm, targetChannels, sampleRate, targetSampleRate)
+      if (wav.sampleRate != targetSampleRate) {
+        pcm = resample(pcm, targetChannels, wav.sampleRate, targetSampleRate)
       }
+      pcm = trimSilence(pcm, targetChannels, targetSampleRate)
       applyFade(pcm, targetChannels, targetSampleRate)
       return pcm
     }
 
-    // 조각을 딱딱 이어붙이면 경계에서 "뭉개지는" 잡음이 난다 — 문장 단위로
-    // 쪼갤수록 이어붙는 지점이 많아져서 더 자주 들린다. 시작·끝을 짧게
-    // 페이드 인/아웃 시켜서 이어붙는 지점을 부드럽게 만든다.
+    // 엔진은 보통 16비트로 주지만, 8비트·32비트 float 로 주는 엔진도 있다.
+    // 형식을 안 따지고 그대로 이어붙이면 그 조각만 찢어지는 잡음이 된다.
+    private fun toPcm16(bytes: ByteArray, wav: WavInfo): ByteArray {
+      val start = wav.dataOffset
+      val end = start + wav.dataSize
+      return when (wav.bitsPerSample) {
+        8 -> ByteArray((end - start) * 2).also { out ->
+          for (i in start until end) {
+            val v = ((bytes[i].toInt() and 0xFF) - 128) shl 8
+            out[(i - start) * 2] = (v and 0xFF).toByte()
+            out[(i - start) * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+          }
+        }
+        32 -> {
+          val src = java.nio.ByteBuffer.wrap(bytes, start, end - start).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+          val count = (end - start) / 4
+          val out = ByteArray(count * 2)
+          val dst = java.nio.ByteBuffer.wrap(out).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+          for (i in 0 until count) {
+            val f = src.getFloat(start + i * 4)
+            dst.putShort(i * 2, (f * 32767f).toInt().coerceIn(-32768, 32767).toShort())
+          }
+          out
+        }
+        else -> bytes.copyOfRange(start, start + ((end - start) and 1.inv()))
+      }
+    }
+
+    // 엔진이 조각 앞뒤에 붙이는 무음 길이는 조각마다 제각각이다. 그대로 이어붙이면
+    // 어떤 줄은 바로 붙고 어떤 줄은 한참 쉬어 리듬이 들쭉날쭉해진다. 말소리 앞뒤로
+    // 여유만 남기고 잘라 낸 뒤, 쉬는 길이는 우리가 넣는 무음으로 일정하게 맞춘다.
+    private fun trimSilence(pcm: ByteArray, channels: Int, sampleRate: Int): ByteArray {
+      val bytesPerFrame = 2 * channels
+      val frames = pcm.size / bytesPerFrame
+      if (frames == 0) return pcm
+      val buf = java.nio.ByteBuffer.wrap(pcm).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+
+      fun loud(frame: Int): Boolean {
+        for (c in 0 until channels) {
+          if (kotlin.math.abs(buf.getShort((frame * channels + c) * 2).toInt()) > SPEECH_THRESHOLD) return true
+        }
+        return false
+      }
+
+      var first = 0
+      while (first < frames && !loud(first)) first++
+      if (first >= frames) return ByteArray(0) // 통째로 무음
+
+      var last = frames - 1
+      while (last > first && !loud(last)) last--
+
+      val from = (first - sampleRate * KEEP_BEFORE_MS / 1000).coerceAtLeast(0)
+      val to = (last + 1 + sampleRate * KEEP_AFTER_MS / 1000).coerceAtMost(frames)
+      return pcm.copyOfRange(from * bytesPerFrame, to * bytesPerFrame)
+    }
+
+    // 잘라 낸 가장자리가 0 이 아닌 값에서 뚝 끊기면 "틱" 소리가 난다. 남겨 둔 여유
+    // 구간(사실상 무음) 안에서만 아주 짧게 페이드시켜 말소리는 건드리지 않는다.
     private fun applyFade(pcm: ByteArray, channels: Int, sampleRate: Int) {
       if (channels <= 0 || sampleRate <= 0) return
       val bytesPerFrame = 2 * channels
       val totalFrames = pcm.size / bytesPerFrame
-      val fadeFrames = (sampleRate * 10 / 1000).coerceAtMost(totalFrames / 2)
+      val fadeFrames = (sampleRate * FADE_MS / 1000).coerceAtMost(totalFrames / 2)
       if (fadeFrames <= 0) return
 
       val buf = java.nio.ByteBuffer.wrap(pcm).order(java.nio.ByteOrder.LITTLE_ENDIAN)
@@ -771,12 +830,6 @@ class TtsFileModule : Module() {
           buf.putShort(idx, v.toShort())
         }
       }
-    }
-
-    private fun readLE(b: ByteArray, offset: Int, size: Int): Int {
-      var v = 0
-      for (i in 0 until size) v = v or ((b[offset + i].toInt() and 0xFF) shl (8 * i))
-      return v
     }
 
     private fun convertChannels(pcm: ByteArray, from: Int, to: Int): ByteArray {

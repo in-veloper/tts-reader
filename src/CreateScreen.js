@@ -14,7 +14,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Speech from 'expo-speech';
 
 import TtsFile from '../modules/tts-file';
-import { segmentText } from './chunk';
+import { segmentForSave, segmentText } from './chunk';
 import { UNSORTED, addFolder } from './library';
 import { player } from './playback';
 import { colors, radius } from './theme';
@@ -384,7 +384,7 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
     async (folder) => {
       setFolderSheetOpen(false);
 
-      const segments = segmentText(text);
+      const segments = segmentForSave(text);
       if (!segments.length) return;
 
       if (!TtsFile) {

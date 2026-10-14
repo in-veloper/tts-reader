@@ -107,3 +107,56 @@ export function segmentText(input) {
 
   return segments;
 }
+
+// 파일 저장용 분할. 읽기(segmentText)처럼 문장·쉼표마다 끊으면 조각마다 엔진이
+// 억양을 처음부터 다시 잡아서, 쉼표 뒤 조각이 문장 끝처럼 뚝 떨어지게 읽히고
+// 이어붙인 자리마다 소리가 씹힌다. 저장은 실시간이 아니라서 끊을 이유가 없으니
+// 줄(문단) 단위로 통째로 넘기고, 문장 안의 쉼은 엔진이 자연스럽게 넣게 둔다.
+// 한 줄이 엔진 한도(MAX_LEN)를 넘을 때만 문장 경계에서 나눈다.
+export function segmentForSave(input) {
+  const text = (input || '').replace(/\r\n?/g, '\n').trim();
+  if (!text) return [];
+
+  const segments = [];
+  const paragraphs = text.split(/\n[ \t]*\n+/);
+
+  paragraphs.forEach((para, pi) => {
+    const lines = para
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    lines.forEach((line, li) => {
+      // 문장 단위로 쌓다가 한도를 넘기 직전에 끊는다
+      const sentences = splitByPunctuation(line)
+        .reduce((acc, piece) => {
+          const last = acc[acc.length - 1];
+          if (last && last.open) {
+            last.text += ' ' + piece.text;
+            last.open = piece.gap !== 'sentence';
+          } else {
+            acc.push({ text: piece.text, open: piece.gap !== 'sentence' });
+          }
+          return acc;
+        }, [])
+        .flatMap((s) => hardSplit(s.text));
+
+      let cur = '';
+      for (const s of sentences.length ? sentences : [line]) {
+        if (cur && cur.length + 1 + s.length > MAX_LEN) {
+          segments.push({ text: cur, gap: 'sentence' });
+          cur = s;
+        } else {
+          cur = cur ? `${cur} ${s}` : s;
+        }
+      }
+      if (cur) segments.push({ text: cur, gap: 'sentence' });
+
+      const lastLine = li === lines.length - 1;
+      const lastPara = pi === paragraphs.length - 1;
+      segments[segments.length - 1].gap = lastLine ? (lastPara ? 'none' : 'para') : 'line';
+    });
+  });
+
+  return segments;
+}

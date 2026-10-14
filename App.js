@@ -91,8 +91,20 @@ export default function App() {
     if (!track?.id || !status.duration) return;
 
     if (countedRef.current.id !== track.id) {
-      countedRef.current = { id: track.id, counted: false };
+      countedRef.current = { id: track.id, counted: false, ready: false };
     }
+
+    // 다음 곡으로 넘어간 직후엔 track 은 이미 새 곡인데 status 는 잠깐 앞 곡의
+    // 재생 시간(끝 무렵)을 그대로 들고 온다. 그걸 새 곡 위치로 저장하면 끊은 적도
+    // 없는 파일에 "이어듣기"가 생기고, 나중에 그 엉뚱한 위치로 튄다.
+    // 새 곡이 처음부터 시작된 걸 봤거나(0~2초) 길이가 그 파일 길이와 맞을 때만 믿는다.
+    if (!countedRef.current.ready) {
+      const fileSec = (track.durationMs || 0) / 1000;
+      const sameLength = fileSec > 0 && Math.abs(status.duration - fileSec) < 1.5;
+      if (status.currentTime < 2 || sameLength) countedRef.current.ready = true;
+      else return;
+    }
+    if (status.currentTime > status.duration + 1) return;
 
     if (status.currentTime < 5) countedRef.current.counted = false;
 
