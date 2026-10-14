@@ -17,6 +17,8 @@ export const REPEAT_MODES = [
   { mode: 'none', icon: 'arrow-forward', label: '반복 없음' },
   { mode: 'single', icon: 'reload', label: '한 곡 반복' },
   { mode: 'all', icon: 'repeat', label: '전체 반복' },
+  // 반복 버튼을 한 번 더 누르면 셔플 반복 — 목록을 무작위 순서로 끝없이 돈다.
+  { mode: 'shuffle', icon: 'shuffle', label: '셔플 반복' },
 ];
 
 export const player = createAudioPlayer(null, { updateInterval: 500 });
@@ -24,6 +26,26 @@ export const player = createAudioPlayer(null, { updateInterval: 500 });
 let state = { queue: [], index: -1, track: null, repeatIndex: 0, rate: 1 };
 const listeners = new Set();
 let pendingSeek = null;
+// 셔플 반복 중에 이번 바퀴에서 이미 튼 곡(인덱스)들 — 다음 곡은 여기 없는 곡 중에서
+// 무작위로 고르고, 이전 버튼은 이 순서를 거꾸로 밟아 돌아간다.
+let shuffleHistory = [];
+
+function isShuffle() {
+  return REPEAT_MODES[state.repeatIndex].mode === 'shuffle';
+}
+
+// 이번 바퀴에 안 튼 곡 중 무작위. 다 틀었으면 새 바퀴를 시작하되 방금 곡은 빼서
+// 같은 곡이 연달아 나오지 않게 한다.
+function shuffleNext() {
+  const all = state.queue.map((_, i) => i);
+  const played = new Set(shuffleHistory);
+  let pool = all.filter((i) => !played.has(i));
+  if (!pool.length) {
+    shuffleHistory = [];
+    pool = state.queue.length > 1 ? all.filter((i) => i !== state.index) : all;
+  }
+  return pool[Math.floor(Math.random() * pool.length)];
+}
 let prepared = false;
 
 function emit(next) {
@@ -127,6 +149,8 @@ function load(index, startPosition = 0) {
   player.setPlaybackRate(state.rate);
   player.play();
 
+  if (isShuffle() && shuffleHistory[shuffleHistory.length - 1] !== index) shuffleHistory.push(index);
+
   applyLockScreen(item);
   emit({ index, track: item });
   persistLastPlay();
@@ -179,6 +203,10 @@ player.addListener('playbackStatusUpdate', (status) => {
 
 function advance() {
   const repeat = REPEAT_MODES[state.repeatIndex].mode;
+  if (repeat === 'shuffle') {
+    if (state.queue.length) load(shuffleNext());
+    return;
+  }
   const last = state.index >= state.queue.length - 1;
 
   if (last && repeat !== 'all') {
@@ -191,6 +219,7 @@ function advance() {
 
 export async function playQueue(items, index, startPosition = 0) {
   await preparePlayback();
+  shuffleHistory = [];
   emit({ queue: items });
   load(index, startPosition);
 }
@@ -248,6 +277,8 @@ export function pruneQueue(validIds) {
   if (queue.length === state.queue.length) return;
 
   const currentGone = state.track && !valid.has(state.track.id);
+  // 인덱스가 바뀌니 셔플 기록은 새로 시작한다
+  shuffleHistory = [];
 
   if (!queue.length || currentGone) {
     player.pause();
@@ -271,6 +302,10 @@ export function togglePlay() {
 }
 
 export function next() {
+  if (isShuffle()) {
+    if (state.queue.length) load(shuffleNext());
+    return;
+  }
   if (state.index < state.queue.length - 1) load(state.index + 1);
   else if (REPEAT_MODES[state.repeatIndex].mode === 'all') load(0);
 }
@@ -279,6 +314,14 @@ export function previous() {
   // 10초 넘게 재생했으면 처음으로, 아니면 이전 곡으로.
   if (player.currentTime > 10) {
     player.seekTo(0);
+    return;
+  }
+  if (isShuffle()) {
+    // 셔플로 틀어 온 순서를 거꾸로 되짚는다
+    if (shuffleHistory.length > 1) {
+      shuffleHistory.pop();
+      load(shuffleHistory[shuffleHistory.length - 1]);
+    } else player.seekTo(0);
     return;
   }
   if (state.index > 0) load(state.index - 1);
@@ -302,6 +345,7 @@ export function setRate(rate) {
 export function cycleRepeat() {
   const repeatIndex = (state.repeatIndex + 1) % REPEAT_MODES.length;
   emit({ repeatIndex });
+  shuffleHistory = isShuffle() && state.index >= 0 ? [state.index] : [];
   player.loop = REPEAT_MODES[repeatIndex].mode === 'single';
   pushWidgetState(player.playing);
   persistLastPlay();

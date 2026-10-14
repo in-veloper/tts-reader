@@ -110,7 +110,11 @@ class PlayerWidgetProvider : AppWidgetProvider() {
 
       views.setImageViewResource(
         R.id.btn_repeat,
-        if (repeat == "none") R.drawable.player_widget_repeat_off else R.drawable.player_widget_repeat_on
+        when (repeat) {
+          "none" -> R.drawable.player_widget_repeat_off
+          "shuffle" -> R.drawable.player_widget_shuffle_on
+          else -> R.drawable.player_widget_repeat_on
+        }
       )
       views.setInt(
         R.id.btn_repeat,
