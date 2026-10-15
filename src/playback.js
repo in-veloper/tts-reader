@@ -63,6 +63,9 @@ export function usePlayback() {
 }
 
 // 잠금화면 컨트롤을 켜야 안드로이드에서 백그라운드 재생이 3분 넘게 유지된다.
+// 위젯으로 화면 없이(헤드리스) 깨어났을 때는 화면이 없어 권한 요청 창을 띄울 수 없다.
+let headlessStart = false;
+
 export async function preparePlayback() {
   if (prepared) return;
   prepared = true;
@@ -74,7 +77,7 @@ export async function preparePlayback() {
   });
 
   try {
-    await requestNotificationPermissionsAsync();
+    if (!headlessStart) await requestNotificationPermissionsAsync();
   } catch {
     // 알림 권한이 없어도 재생 자체는 된다. 잠금화면 표시만 빠진다.
   }
@@ -237,7 +240,8 @@ function wait(ms) {
 // 완전히 준비되기 전이라 listLibrary() 가 가끔 빈 목록을 돌려주는 순간이
 // 있었다 — "위젯에서 재생이 안 될 때가 있다"는 게 바로 이 타이밍 문제였다.
 // 권한을 먼저 확인하고, 목록이 비어 있으면 한 번 더 시도한다.
-export async function resumeFromWidget(action) {
+export async function resumeFromWidget(action, { headless = false } = {}) {
+  if (headless) headlessStart = true;
   try {
     const raw = await AsyncStorage.getItem(LAST_PLAY_KEY);
     if (!raw) return;

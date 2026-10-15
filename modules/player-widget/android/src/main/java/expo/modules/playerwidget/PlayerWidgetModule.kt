@@ -1,5 +1,12 @@
 package expo.modules.playerwidget
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Handler
+import android.os.Looper
+import android.os.Build
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -14,6 +21,9 @@ import expo.modules.kotlin.modules.ModuleDefinition
 // /next/previous 를 그대로 부른다. 이 모듈 인스턴스가 아직 없으면(=JS 가 안
 // 떠 있으면) false 를 돌려주고, 리시버 쪽에서 대신 앱을 연다.
 class PlayerWidgetModule : Module() {
+  private var screenReceiver: BroadcastReceiver? = null
+  private val handler = Handler(Looper.getMainLooper())
+
   init {
     current = this
   }
@@ -22,8 +32,35 @@ class PlayerWidgetModule : Module() {
     Name("PlayerWidget")
     Events("onWidgetAction")
 
+    // 화면을 껐다 켜거나 잠금을 풀면 런처가 위젯을 다시 띄우면서 제목 흐르기가 멈춘다.
+    // 재생 중엔 앱이 살아 있으니, 그때 위젯을 처음부터 새로 그려 흐르기를 다시 시작시킨다.
+    OnCreate {
+      val context = appContext.reactContext?.applicationContext ?: return@OnCreate
+      val receiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+          PlayerWidgetProvider.refreshAll(ctx, reinflate = true)
+          // 잠금화면이 완전히 뜬 뒤에도 한 번 더(막 켜진 순간엔 위젯이 아직 안 붙어 있을 수 있다)
+          handler.postDelayed({ PlayerWidgetProvider.refreshAll(ctx, reinflate = true) }, 700)
+        }
+      }
+      val filter = IntentFilter().apply {
+        addAction(Intent.ACTION_SCREEN_ON)
+        addAction(Intent.ACTION_USER_PRESENT)
+      }
+      if (Build.VERSION.SDK_INT >= 33) {
+        context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+      } else {
+        context.registerReceiver(receiver, filter)
+      }
+      screenReceiver = receiver
+    }
+
     OnDestroy {
       if (current === this@PlayerWidgetModule) current = null
+      screenReceiver?.let { r ->
+        runCatching { appContext.reactContext?.applicationContext?.unregisterReceiver(r) }
+      }
+      screenReceiver = null
     }
 
     Function("update") { title: String?, subtitle: String?, playing: Boolean, repeat: String? ->

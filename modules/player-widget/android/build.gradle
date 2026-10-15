@@ -13,3 +13,8 @@ android {
     versionName "0.1.0"
   }
 }
+
+dependencies {
+  // 위젯에서 화면 없이 재생을 시작하는 헤드리스 JS 서비스(WidgetPlaybackService)에 필요
+  implementation "com.facebook.react:react-android"
+}

@@ -63,11 +63,20 @@ class PlayerWidgetProvider : AppWidgetProvider() {
 
     val delivered = PlayerWidgetModule.dispatch(action)
     if (!delivered) {
-      val openApp = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("stepby://widget?action=$action")).apply {
-        setPackage(context.packageName)
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      // 앱(JS)이 꺼져 있다 — 화면을 띄우는 대신 화면 없이 JS 만 깨워 재생한다.
+      // (잠금화면·백그라운드에서 앱 화면을 띄우는 건 안드로이드가 막아서 예전 방식은 아무 일도 안 일어났다.)
+      val service = Intent(context, WidgetPlaybackService::class.java).putExtra(EXTRA_ACTION, action)
+      try {
+        com.facebook.react.HeadlessJsTaskService.acquireWakeLockNow(context)
+        if (android.os.Build.VERSION.SDK_INT >= 26) context.startForegroundService(service)
+        else context.startService(service)
+      } catch (e: Exception) {
+        val openApp = Intent(Intent.ACTION_VIEW, android.net.Uri.parse("stepby://widget?action=$action")).apply {
+          setPackage(context.packageName)
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { context.startActivity(openApp) }
       }
-      context.startActivity(openApp)
     }
   }
 
@@ -84,14 +93,22 @@ class PlayerWidgetProvider : AppWidgetProvider() {
         .apply()
     }
 
-    fun refreshAll(context: Context) {
+    // 제목 흐르기(마키)는 위젯을 처음부터 새로 그릴 때만 다시 시작된다 — 같은 레이아웃으로
+    // 다시 보내면 런처가 글자만 바꿔 끼우고 칸을 새로 만들지 않는다. 화면을 다시 켰을 때처럼
+    // 흐르기가 멈춘 경우엔 reinflate=true 로, 똑같이 생긴 두 레이아웃을 번갈아 써서 새로 그리게 한다.
+    @Volatile
+    private var useAlt = false
+
+    fun refreshAll(context: Context, reinflate: Boolean = false) {
+      if (reinflate) useAlt = !useAlt
       val mgr = AppWidgetManager.getInstance(context)
       val ids = mgr.getAppWidgetIds(ComponentName(context, PlayerWidgetProvider::class.java))
       ids.forEach { render(context, mgr, it) }
     }
 
     private fun render(context: Context, mgr: AppWidgetManager, appWidgetId: Int) {
-      val views = RemoteViews(context.packageName, R.layout.player_widget)
+      val layout = if (useAlt) R.layout.player_widget_alt else R.layout.player_widget
+      val views = RemoteViews(context.packageName, layout)
 
       val openApp = context.packageManager.getLaunchIntentForPackage(context.packageName)
       val openAppPending = openApp?.let {

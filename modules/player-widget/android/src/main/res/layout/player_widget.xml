@@ -99,8 +99,21 @@
         android:textSize="12sp"
         android:textStyle="bold"
         android:textColor="#F1F5F9"
-        android:maxLines="1"
-        android:ellipsize="end" />
+        android:singleLine="true"
+        android:ellipsize="marquee"
+        android:marqueeRepeatLimit="marquee_forever"
+        android:scrollHorizontally="true"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:duplicateParentState="true">
+        <!-- 제목이 칸보다 길면 왼쪽으로 흘러가며 나머지를 보여준다(마키).
+             위젯에서는 포커스를 가진 TextView 만 흐르므로 requestFocus 로 붙잡아 둔다.
+             삼성 폰에서는 duplicateParentState 까지 넣어야 흐른다(빼 봤더니 안 흘렀다). -->
+        <requestFocus
+          android:focusable="true"
+          android:focusableInTouchMode="true"
+          android:duplicateParentState="true" />
+      </TextView>
 
       <TextView
         android:id="@+id/widget_subtitle"
