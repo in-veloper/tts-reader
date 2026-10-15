@@ -18,6 +18,7 @@ import { segmentForSave, segmentText } from './chunk';
 import { UNSORTED, addFolder } from './library';
 import { player } from './playback';
 import { colors, radius } from './theme';
+import DotLoader from './DotLoader';
 import {
   Card,
   CircleButton,
@@ -576,7 +577,9 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
           </Label>
           <View style={styles.voiceList}>
             {loadingVoices ? (
-              <ActivityIndicator style={styles.loader} color={colors.accentSoft} />
+              <View style={styles.loader}>
+                <DotLoader size={26} color={colors.accentSoft} />
+              </View>
             ) : voices.length === 0 ? (
               <View style={styles.empty}>
                 <Text style={styles.emptyText}>

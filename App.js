@@ -174,12 +174,7 @@ export default function App() {
             accessible={false}
           />
           <View style={styles.header}>
-            <View>
-              <Text style={styles.brand}>스텝바이</Text>
-              <Text style={styles.tagline}>
-                {tab === 'create' ? '텍스트를 목소리로' : '과목별로 듣기'}
-              </Text>
-            </View>
+            <Text style={styles.brand}>STEPBY</Text>
           </View>
 
           <View style={styles.content}>
@@ -268,8 +263,8 @@ const styles = StyleSheet.create({
   screen: { flex: 1, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 10, gap: 12 },
 
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  brand: { color: colors.text, fontSize: 26, fontWeight: '800', letterSpacing: -0.6 },
-  tagline: { color: colors.textFaint, fontSize: 13, marginTop: 2 },
+  // READTRACK·CREDO 처럼 영문 대문자 + 넓은 자간 워드마크
+  brand: { color: colors.text, fontFamily: 'Pretendard-Bold', fontSize: 20, letterSpacing: 5 },
 
   content: { flex: 1 },
 

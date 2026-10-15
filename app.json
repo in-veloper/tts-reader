@@ -2,12 +2,14 @@
   "expo": {
     "name": "스텝바이",
     "slug": "stepby",
-    "version": "1.8.0",
+    "version": "1.8.3",
     "scheme": "stepby",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "assetBundlePatterns": ["assets/**/*"],
+    "assetBundlePatterns": [
+      "assets/**/*"
+    ],
     "ios": {
       "supportsTablet": true
     },
@@ -19,7 +21,7 @@
         "backgroundColor": "#D4EDFE"
       },
       "package": "com.stepby.app",
-      "versionCode": 40,
+      "versionCode": 43,
       "permissions": [
         "android.permission.READ_MEDIA_AUDIO",
         "android.permission.POST_NOTIFICATIONS"
@@ -36,6 +38,14 @@
         {
           "recordAudioAndroid": false,
           "enableBackgroundPlayback": true
+        }
+      ],
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "./assets/fonts/Pretendard-Bold.ttf"
+          ]
         }
       ]
     ]

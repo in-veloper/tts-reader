@@ -14,6 +14,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 
 import { colors, gradient, label, radius } from './theme';
+import DotLoader from './DotLoader';
 
 export function Card({ style, children }) {
   return <View style={[styles.card, style]}>{children}</View>;
@@ -342,7 +343,7 @@ export function Overlay({ visible, text, progress }) {
     <Modal visible={visible} transparent animationType="fade" statusBarTranslucent>
       <View style={styles.overlay}>
         <View style={styles.overlayCard}>
-          <ActivityIndicator color={colors.accentSoft} size="large" />
+          <DotLoader size={44} color={colors.accentSoft} />
           <Text style={styles.overlayText}>{text}</Text>
 
           {hasProgress ? (
