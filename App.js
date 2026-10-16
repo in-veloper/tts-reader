@@ -5,12 +5,11 @@ import {
   Linking,
   Platform,
   Pressable,
-  SafeAreaView,
-  StatusBar as RNStatusBar,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import { useAudioPlayerStatus } from 'expo-audio';
@@ -31,7 +30,18 @@ import { Overlay, Toast } from './src/ui';
 const SAVE_EVERY_MS = 5000;
 const COUNT_AT = 0.85;
 
+// 화면 위·아래 여백은 시스템이 알려주는 실제 값(상태바·네비게이션 바)을 쓴다.
+// 예전엔 react-native 의 SafeAreaView(안드로이드에선 아무 일도 안 함) + 상태바
+// 높이만 직접 더해서, 버튼식 네비게이션 바를 켜면 하단 탭이 그 밑에 가려졌다.
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <Main />
+    </SafeAreaProvider>
+  );
+}
+
+function Main() {
   const [tab, setTab] = useState('create');
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(null);
@@ -157,7 +167,7 @@ export default function App() {
     : null;
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom', 'left', 'right']}>
       <StatusBar style="dark" />
       <KeyboardAvoidingView
         style={styles.flex}
@@ -257,7 +267,6 @@ const styles = StyleSheet.create({
   safe: {
     flex: 1,
     backgroundColor: colors.bg,
-    paddingTop: Platform.OS === 'android' ? RNStatusBar.currentHeight : 0,
   },
   flex: { flex: 1 },
   screen: { flex: 1, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 10, gap: 12 },

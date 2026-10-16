@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { colors, gradient, label, radius } from './theme';
 import DotLoader from './DotLoader';
@@ -150,6 +151,7 @@ function Dots() {
 export function Sheet({ visible, title, onClose, children }) {
   const translateY = useRef(new Animated.Value(0)).current;
   const [keyboard, setKeyboard] = useState(0);
+  const insets = useSafeAreaInsets();
 
   // PanResponder 는 한 번만 만들어지므로 최신 onClose 는 ref 로 읽는다.
   const closeRef = useRef(onClose);
@@ -222,12 +224,16 @@ export function Sheet({ visible, title, onClose, children }) {
   ).current;
 
   return (
+    // 시트 창은 네비게이션 바 밑까지 항상 깔리게 고정하고(기기·설정마다 달라지지
+    // 않게), 그 높이(insets.bottom)만큼 내용을 올린다. 키보드 높이는 RN 이
+    // 네비게이션 바를 뺀 값으로 주므로 키보드가 떠 있을 땐 둘을 더해서 올린다.
     <Modal
       visible={visible}
       transparent
       animationType="slide"
       onRequestClose={onClose}
       statusBarTranslucent
+      navigationBarTranslucent
     >
       <View style={styles.sheetRoot}>
         <Pressable style={styles.backdrop} onPress={onClose} />
@@ -236,7 +242,8 @@ export function Sheet({ visible, title, onClose, children }) {
           style={[
             styles.sheet,
             {
-              marginBottom: keyboard,
+              marginBottom: keyboard > 0 ? keyboard + insets.bottom : 0,
+              paddingBottom: keyboard > 0 ? 28 : 28 + insets.bottom,
               maxHeight: keyboard > 0 ? '60%' : '82%',
               transform: [{ translateY }],
             },
@@ -262,6 +269,7 @@ export function Sheet({ visible, title, onClose, children }) {
 
 export function Toast({ toast, onHide }) {
   const anim = useRef(new Animated.Value(0)).current;
+  const insets = useSafeAreaInsets();
 
   // onHide 는 대부분 인라인 함수로 넘어온다. 그대로 의존성에 넣으면
   // 부모가 리렌더될 때마다 타이머가 초기화돼서 토스트가 사라지지 않는다.
@@ -298,6 +306,8 @@ export function Toast({ toast, onHide }) {
       style={[
         styles.toast,
         {
+          // 절대 위치는 부모의 여백(padding)을 무시하므로 네비게이션 바 높이를 직접 더한다.
+          bottom: 28 + insets.bottom,
           opacity: anim,
           transform: [
             { translateY: anim.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) },

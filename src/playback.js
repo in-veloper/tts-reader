@@ -130,23 +130,40 @@ function loadArtwork() {
   return artworkLoading;
 }
 
+// 릴리즈 빌드에서는 번들 그림의 주소가 file:// 경로가 아니라 'assets_artwork' 같은
+// 리소스 이름으로 나온다. 네이티브는 이걸 URL 로 못 바꿔서 곡 정보 갱신 호출을
+// 통째로 거부했고(catch 가 조용히 삼킴), 그래서 차·알림창 플레이어가 첫 곡 제목에서
+// 멈춰 있었다. 진짜 URL 일 때만 그림을 붙인다.
 function lockScreenMeta(item, art) {
+  const usableArt = typeof art === 'string' && /^(file|https?):\/\//.test(art);
   return {
     title: displayName(item.name),
     artist: item.folder,
     albumTitle: '스텝바이',
-    ...(art ? { artworkUrl: art } : {}),
+    ...(usableArt ? { artworkUrl: art } : {}),
   };
 }
+
+// 잠금화면 컨트롤은 처음 한 번만 켜고, 곡이 바뀔 땐 곡 정보만 갈아 끼운다.
+// expo-audio 는 setActiveForLockScreen 이 올 때마다 미디어 세션을 없애고 새로
+// 만드는데, 차(블루투스)·알림창 플레이어는 처음 붙은 세션을 계속 붙잡고 있어서
+// 다음 곡으로 넘어가도 첫 곡 제목이 그대로 남았다. updateLockScreenMetadata 는
+// 같은 세션에 "곡 정보 바뀜"만 알려서 붙어 있는 쪽이 바로 따라 바뀐다.
+let lockScreenOn = false;
 
 function applyLockScreen(item) {
   if (!item) return;
   try {
     // 그림을 기다리지 않고 제목과 함께 바로 켠다 — 차 블루투스로 가는 곡 정보도 이 컨트롤이 보낸다.
-    player.setActiveForLockScreen(true, lockScreenMeta(item, artworkUrl), {
-      showSeekForward: true,
-      showSeekBackward: true,
-    });
+    if (lockScreenOn) {
+      player.updateLockScreenMetadata(lockScreenMeta(item, artworkUrl));
+    } else {
+      player.setActiveForLockScreen(true, lockScreenMeta(item, artworkUrl), {
+        showSeekForward: true,
+        showSeekBackward: true,
+      });
+      lockScreenOn = true;
+    }
   } catch {
     // 잠금화면 표시가 안 되어도 재생은 계속된다.
   }
@@ -338,6 +355,7 @@ export function pruneQueue(validIds) {
     } catch {
       // 잠금화면에 올라가 있지 않았으면 무시.
     }
+    lockScreenOn = false;
     emit({ queue: [], index: -1, track: null });
     pushWidgetState(false);
     return;
