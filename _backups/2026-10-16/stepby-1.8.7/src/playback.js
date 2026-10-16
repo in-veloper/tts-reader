@@ -1,0 +1,428 @@
+import { useSyncExternalStore } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Asset } from 'expo-asset';
+import {
+  createAudioPlayer,
+  requestNotificationPermissionsAsync,
+  setAudioModeAsync,
+} from 'expo-audio';
+
+import { displayName, ensureAudioPermission, loadLibrary } from './library';
+import PlayerWidget from '../modules/player-widget';
+
+const LAST_PLAY_KEY = 'stepby/lastPlay';
+
+export const RATES = [1, 1.25, 1.5, 1.75, 2];
+export const REPEAT_MODES = [
+  { mode: 'none', icon: 'arrow-forward', label: '반복 없음' },
+  { mode: 'single', icon: 'reload', label: '한 곡 반복' },
+  { mode: 'all', icon: 'repeat', label: '전체 반복' },
+  // 반복 버튼을 한 번 더 누르면 셔플 반복 — 목록을 무작위 순서로 끝없이 돈다.
+  { mode: 'shuffle', icon: 'shuffle', label: '셔플 반복' },
+];
+
+export const player = createAudioPlayer(null, { updateInterval: 500 });
+
+let state = { queue: [], index: -1, track: null, repeatIndex: 0, rate: 1 };
+const listeners = new Set();
+let pendingSeek = null;
+// 지금 곡에서 마지막으로 확인된 재생 위치(초) — 재생기가 비워졌을 때 여기서부터 다시 튼다
+let lastTime = 0;
+// 셔플 반복 중에 이번 바퀴에서 이미 튼 곡(인덱스)들 — 다음 곡은 여기 없는 곡 중에서
+// 무작위로 고르고, 이전 버튼은 이 순서를 거꾸로 밟아 돌아간다.
+let shuffleHistory = [];
+
+function isShuffle() {
+  return REPEAT_MODES[state.repeatIndex].mode === 'shuffle';
+}
+
+// 이번 바퀴에 안 튼 곡 중 무작위. 다 틀었으면 새 바퀴를 시작하되 방금 곡은 빼서
+// 같은 곡이 연달아 나오지 않게 한다.
+function shuffleNext() {
+  const all = state.queue.map((_, i) => i);
+  const played = new Set(shuffleHistory);
+  let pool = all.filter((i) => !played.has(i));
+  if (!pool.length) {
+    shuffleHistory = [];
+    pool = state.queue.length > 1 ? all.filter((i) => i !== state.index) : all;
+  }
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+let prepared = false;
+
+function emit(next) {
+  state = { ...state, ...next };
+  listeners.forEach((listener) => listener());
+}
+
+export function subscribe(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+export function usePlayback() {
+  return useSyncExternalStore(subscribe, () => state);
+}
+
+// 잠금화면 컨트롤을 켜야 안드로이드에서 백그라운드 재생이 3분 넘게 유지된다.
+// 위젯으로 화면 없이(헤드리스) 깨어났을 때는 화면이 없어 권한 요청 창을 띄울 수 없다.
+let headlessStart = false;
+
+// 백그라운드 재생 허용은 첫 재생 때가 아니라 앱(또는 위젯으로 깨어난 JS)이 뜨자마자 켠다.
+// 예전엔 첫 재생 때만 켜서, 앱을 열기만 하고 닫은 뒤 위젯으로 재생을 누르면 이 설정이 꺼진 채라
+// 버튼만 '재생 중'으로 바뀌고 소리가 안 났다.
+let audioModeReady = null;
+export function ensureAudioMode() {
+  if (!audioModeReady) {
+    audioModeReady = setAudioModeAsync({
+      playsInSilentMode: true,
+      shouldPlayInBackground: true,
+      interruptionMode: 'doNotMix',
+    }).catch(() => {
+      audioModeReady = null;
+    });
+  }
+  return audioModeReady;
+}
+ensureAudioMode();
+
+export async function preparePlayback() {
+  if (prepared) return;
+  prepared = true;
+
+  await ensureAudioMode();
+
+  try {
+    if (!headlessStart) await requestNotificationPermissionsAsync();
+  } catch {
+    // 알림 권한이 없어도 재생 자체는 된다. 잠금화면 표시만 빠진다.
+  }
+}
+
+// 삼성 미디어 위젯·잠금화면은 앨범 아트에서 뽑은 색으로 스스로 물든다.
+// 아트를 안 주면 재생 파일마다 제각각 색이 나오는데(보라 계열로 자주 떨어짐),
+// 우리 쪽에서 고정된 이미지를 하나 줘서 항상 같은 차분한 톤이 나오게 한다.
+// require() 는 번들 안의 자산을 가리킬 뿐이고, 기기에서 실제로 읽을 수 있는
+// file:// 경로로 바꾸려면 expo-asset 으로 한 번 내려받아야(캐시로 복사) 한다.
+// 앱 화면 없이(위젯으로) 깨어났을 때 이 그림 준비가 끝나지 않고 멈춰 버리는 일이 있었다.
+// 예전엔 그림이 준비될 때까지 잠금화면 컨트롤을 아예 안 켰고, 멈춘 결과까지 저장돼서
+// 그 뒤로는 앱을 열어도 잠금화면 컨트롤·차(블루투스) 곡 정보가 계속 안 나왔다.
+// 이제 1.5초 안에 못 가져오면 포기하고(다음에 다시 시도), 컨트롤은 그림 없이 먼저 켠다.
+let artworkUrl = null;
+let artworkLoading = null;
+function loadArtwork() {
+  if (artworkUrl) return Promise.resolve(artworkUrl);
+  if (!artworkLoading) {
+    const load = (async () => {
+      const asset = Asset.fromModule(require('../assets/artwork.png'));
+      await asset.downloadAsync();
+      return asset.localUri || asset.uri || null;
+    })();
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 1500));
+    artworkLoading = Promise.race([load, timeout])
+      .catch(() => null)
+      .then((url) => {
+        artworkLoading = null;
+        if (url) artworkUrl = url;
+        return url;
+      });
+  }
+  return artworkLoading;
+}
+
+function lockScreenMeta(item, art) {
+  return {
+    title: displayName(item.name),
+    artist: item.folder,
+    albumTitle: '스텝바이',
+    ...(art ? { artworkUrl: art } : {}),
+  };
+}
+
+function applyLockScreen(item) {
+  if (!item) return;
+  try {
+    // 그림을 기다리지 않고 제목과 함께 바로 켠다 — 차 블루투스로 가는 곡 정보도 이 컨트롤이 보낸다.
+    player.setActiveForLockScreen(true, lockScreenMeta(item, artworkUrl), {
+      showSeekForward: true,
+      showSeekBackward: true,
+    });
+  } catch {
+    // 잠금화면 표시가 안 되어도 재생은 계속된다.
+  }
+  if (!artworkUrl) {
+    loadArtwork().then((art) => {
+      if (!art || state.track?.id !== item.id) return;
+      try {
+        player.updateLockScreenMetadata(lockScreenMeta(item, art));
+      } catch {
+        // 그림만 못 붙인 것 — 무시한다.
+      }
+    });
+  }
+}
+
+// 앱이 완전히 꺼진 뒤 위젯에서 재생을 걸면(resumeFromWidget) 무엇을 어디서부터
+// 이어 틀지 알아야 한다 — 큐/인덱스는 메모리에만 있어서 그대로는 못 쓰니,
+// 바뀔 때마다 아이디 목록 + 지금 듣던 아이디 + 반복 모드만 가볍게 저장해 둔다.
+// 실제 이어듣기 위치(초)는 이미 library.js 의 savePosition() 이 곡별로 저장하고
+// 있으므로 여기서 다시 저장할 필요는 없다.
+function persistLastPlay() {
+  const track = state.queue[state.index];
+  if (!track) return;
+  AsyncStorage.setItem(
+    LAST_PLAY_KEY,
+    JSON.stringify({
+      ids: state.queue.map((item) => item.id),
+      currentId: track.id,
+      repeatIndex: state.repeatIndex,
+    })
+  ).catch(() => {});
+}
+
+function load(index, startPosition = 0) {
+  const item = state.queue[index];
+  if (!item) return;
+
+  pendingSeek = startPosition > 1 ? startPosition : null;
+  lastTime = startPosition;
+
+  player.replace(item.uri);
+  player.loop = REPEAT_MODES[state.repeatIndex].mode === 'single';
+  player.setPlaybackRate(state.rate);
+  player.play();
+
+  if (isShuffle() && shuffleHistory[shuffleHistory.length - 1] !== index) shuffleHistory.push(index);
+
+  applyLockScreen(item);
+  emit({ index, track: item });
+  persistLastPlay();
+}
+
+// 홈/잠금화면 위젯은 지금 재생 중인 게 뭔지 스스로 알 방법이 없다 — 제목·재생
+// 여부·반복 모드가 바뀔 때마다 여기서 밀어 준다. 위치(currentTime) 는 0.5초마다
+// 바뀌므로 매번 보내면 위젯을 쓸데없이 자주 다시 그리게 된다. 이 셋 중 하나라도
+// 바뀔 때만 보낸다.
+let lastWidgetKey = null;
+function pushWidgetState(playing) {
+  if (!PlayerWidget) return;
+
+  const track = state.track;
+  const repeatMode = REPEAT_MODES[state.repeatIndex].mode;
+  const key = `${track?.id || ''}|${playing}|${repeatMode}`;
+  if (key === lastWidgetKey) return;
+  lastWidgetKey = key;
+
+  PlayerWidget.update(
+    track ? displayName(track.name) : null,
+    track?.folder || null,
+    !!playing,
+    repeatMode
+  );
+}
+
+// 위젯 버튼(재생/이전/다음)은 여기로 들어온다. 앱이 완전히 꺼져 있으면 이
+// 리스너 자체가 없으니(=JS 가 안 떠 있으니) 위젯 쪽에서 대신 앱을 연다 —
+// 백그라운드 재생 중일 때만 이 경로가 실제로 쓰인다.
+PlayerWidget?.addListener('onWidgetAction', async (e) => {
+  await ensureAudioMode();
+  // 앱을 열기만 하고 아무것도 안 틀었으면 지금 곡이 없다 — 마지막으로 듣던 곳부터 이어 튼다
+  if (!state.track && e?.action !== 'repeat') {
+    resumeFromWidget(e?.action);
+    return;
+  }
+  if (e?.action === 'toggle') togglePlay();
+  else if (e?.action === 'next') next();
+  else if (e?.action === 'previous') previous();
+  else if (e?.action === 'repeat') cycleRepeat();
+});
+
+player.addListener('playbackStatusUpdate', (status) => {
+  if (status.isLoaded && status.currentTime > 0) lastTime = status.currentTime;
+  if (pendingSeek != null && status.isLoaded) {
+    const target = pendingSeek;
+    pendingSeek = null;
+    player.seekTo(target);
+  }
+
+  pushWidgetState(status.playing);
+
+  // loop 이 켜져 있으면(한 곡 반복) didJustFinish 는 오지 않는다.
+  if (status.didJustFinish) advance();
+});
+
+function advance() {
+  const repeat = REPEAT_MODES[state.repeatIndex].mode;
+  if (repeat === 'shuffle') {
+    if (state.queue.length) load(shuffleNext());
+    return;
+  }
+  const last = state.index >= state.queue.length - 1;
+
+  if (last && repeat !== 'all') {
+    player.pause();
+    return;
+  }
+
+  load(last ? 0 : state.index + 1);
+}
+
+export async function playQueue(items, index, startPosition = 0) {
+  await preparePlayback();
+  shuffleHistory = [];
+  emit({ queue: items });
+  load(index, startPosition);
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// 위젯에서 잠금화면인 채로 재생 버튼을 눌렀는데 앱(JS)이 완전히 꺼져 있었을 때
+// App.js 가 딥링크(stepby://widget)로 받아서 부른다. 마지막으로 듣던 큐를
+// 아이디로 다시 찾아 복원하고, 저장돼 있던 위치(library.js 의 savePosition)
+// 부터 이어 튼다.
+//
+// 진짜 콜드부트(프로세스가 막 새로 뜬 직후)에는 네이티브 모듈/권한이 아직
+// 완전히 준비되기 전이라 listLibrary() 가 가끔 빈 목록을 돌려주는 순간이
+// 있었다 — "위젯에서 재생이 안 될 때가 있다"는 게 바로 이 타이밍 문제였다.
+// 권한을 먼저 확인하고, 목록이 비어 있으면 한 번 더 시도한다.
+export async function resumeFromWidget(action, { headless = false } = {}) {
+  if (headless) headlessStart = true;
+  try {
+    const raw = await AsyncStorage.getItem(LAST_PLAY_KEY);
+    if (!raw) return;
+    const last = JSON.parse(raw);
+    if (!last?.ids?.length) return;
+
+    await ensureAudioPermission();
+
+    let items = (await loadLibrary()).items;
+    if (!items.length) {
+      await wait(400);
+      items = (await loadLibrary()).items;
+    }
+
+    const byId = new Map(items.map((item) => [item.id, item]));
+    const queue = last.ids.map((id) => byId.get(id)).filter(Boolean);
+    if (!queue.length) return;
+
+    const index = Math.max(0, queue.findIndex((item) => item.id === last.currentId));
+    emit({ repeatIndex: last.repeatIndex ?? state.repeatIndex });
+    await playQueue(queue, index, queue[index]?.position || 0);
+
+    if (action === 'next') next();
+    else if (action === 'previous') previous();
+    else if (action === 'repeat') cycleRepeat();
+  } catch {
+    // 복원에 실패해도 앱 자체는 열린 상태이니 사용자가 직접 고르면 된다.
+  }
+}
+
+// 서재에서 파일을 지우면 큐에 남은 유령 항목을 걷어낸다.
+export function pruneQueue(validIds) {
+  if (!state.queue.length) return;
+
+  const valid = new Set(validIds);
+  const queue = state.queue.filter((item) => valid.has(item.id));
+  if (queue.length === state.queue.length) return;
+
+  const currentGone = state.track && !valid.has(state.track.id);
+  // 인덱스가 바뀌니 셔플 기록은 새로 시작한다
+  shuffleHistory = [];
+
+  if (!queue.length || currentGone) {
+    player.pause();
+    try {
+      player.clearLockScreenControls();
+    } catch {
+      // 잠금화면에 올라가 있지 않았으면 무시.
+    }
+    emit({ queue: [], index: -1, track: null });
+    pushWidgetState(false);
+    return;
+  }
+
+  emit({ queue, index: queue.findIndex((item) => item.id === state.track.id) });
+}
+
+// 알림창의 재생 카드를 닫으면 안드로이드가 재생기에 "정지"를 보내 불러온 파일까지 비운다.
+// 그 상태에서 play() 만 부르면 아무 소리도 안 나서(위젯 버튼만 재생 중으로 바뀜),
+// 비어 있으면 마지막으로 듣던 위치부터 다시 불러와 튼다.
+export function togglePlay() {
+  if (!state.track) return;
+  if (player.playing) {
+    player.pause();
+    return;
+  }
+  if (!player.isLoaded && !player.isBuffering) {
+    load(state.index, lastTime);
+    return;
+  }
+  player.play();
+}
+
+export function next() {
+  if (isShuffle()) {
+    if (state.queue.length) load(shuffleNext());
+    return;
+  }
+  if (state.index < state.queue.length - 1) load(state.index + 1);
+  else if (REPEAT_MODES[state.repeatIndex].mode === 'all') load(0);
+}
+
+export function previous() {
+  // 10초 넘게 재생했으면 처음으로, 아니면 이전 곡으로.
+  if (player.currentTime > 10) {
+    player.seekTo(0);
+    return;
+  }
+  if (isShuffle()) {
+    // 셔플로 틀어 온 순서를 거꾸로 되짚는다
+    if (shuffleHistory.length > 1) {
+      shuffleHistory.pop();
+      load(shuffleHistory[shuffleHistory.length - 1]);
+    } else player.seekTo(0);
+    return;
+  }
+  if (state.index > 0) load(state.index - 1);
+  else player.seekTo(0);
+}
+
+export function seekBy(seconds) {
+  const target = Math.max(0, player.currentTime + seconds);
+  player.seekTo(Math.min(target, player.duration || target));
+}
+
+export function seekTo(seconds) {
+  player.seekTo(seconds);
+}
+
+export function setRate(rate) {
+  emit({ rate });
+  player.setPlaybackRate(rate);
+}
+
+export function cycleRepeat() {
+  const repeatIndex = (state.repeatIndex + 1) % REPEAT_MODES.length;
+  emit({ repeatIndex });
+  shuffleHistory = isShuffle() && state.index >= 0 ? [state.index] : [];
+  player.loop = REPEAT_MODES[repeatIndex].mode === 'single';
+  pushWidgetState(player.playing);
+  persistLastPlay();
+}
+
+export function formatSeconds(seconds) {
+  if (!seconds || seconds < 0) return '0:00';
+
+  const total = Math.round(seconds);
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+  }
+
+  return `${minutes}:${String(rest).padStart(2, '0')}`;
+}

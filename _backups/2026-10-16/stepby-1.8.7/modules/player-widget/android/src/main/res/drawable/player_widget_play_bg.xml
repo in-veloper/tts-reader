@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 재생/일시정지 큰 원형 버튼. theme.js 의 gradient(accent -> accentEnd)
+     그대로 채워서 화면 속 primary 버튼과 같은 느낌으로. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+  android:shape="oval">
+  <gradient
+    android:type="linear"
+    android:angle="45"
+    android:startColor="#0D9488"
+    android:endColor="#0891B2" />
+</shape>

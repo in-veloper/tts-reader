@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 반복 없음 상태 아이콘 — 얇은 선 기반의 모던한 반복 기호(옅은 회색). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+  android:width="24dp"
+  android:height="24dp"
+  android:viewportWidth="24"
+  android:viewportHeight="24">
+  <path
+    android:fillColor="#00000000"
+    android:strokeColor="#64748B"
+    android:strokeWidth="2"
+    android:strokeLineCap="round"
+    android:strokeLineJoin="round"
+    android:pathData="M17,1l4,4l-4,4M3,11V9a4,4 0 0,1 4,-4h14M7,23l-4,-4l4,-4M21,13v2a4,4 0 0,1 -4,4H3" />
+</vector>

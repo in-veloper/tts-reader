@@ -44,6 +44,11 @@ class PlayerWidgetProvider : AppWidgetProvider() {
   override fun onReceive(context: Context, intent: Intent) {
     super.onReceive(context, intent)
 
+    if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+      refreshAll(context)
+      return
+    }
+
     val action = when (intent.action) {
       ACTION_TOGGLE -> "toggle"
       ACTION_NEXT -> "next"

@@ -1,0 +1,12 @@
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+  android:minWidth="200dp"
+  android:minHeight="140dp"
+  android:targetCellWidth="4"
+  android:targetCellHeight="2"
+  android:updatePeriodMillis="1800000"
+  android:previewLayout="@layout/player_widget"
+  android:initialLayout="@layout/player_widget"
+  android:initialKeyguardLayout="@layout/player_widget"
+  android:widgetCategory="home_screen|keyguard"
+  android:resizeMode="horizontal|vertical"
+  android:description="@string/player_widget_description" />

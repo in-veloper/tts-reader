@@ -103,3 +103,46 @@ index 18203a3..87fb0ae 100644
      override fun onEvents(player: Player, events: Player.Events) {
        listener.onEvents(this@MetadataInjectingPlayer, events)
      }
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+index 196a5d5..97f94cc 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+@@ -292,6 +292,17 @@ class AudioControlsService : MediaSessionService() {
+ 
+   private fun postOrStartForegroundNotificationNow(startInForeground: Boolean) {
+     val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
++    // [스텝바이 패치] 멈추면(위젯·앱·카드 어디서든) 재생 카드를 내린다. 원래는 멈춰도 카드가
++    // 포그라운드 알림으로 남아 있어서, 밀어서 지워도 다음 상태 변화 때 "한 번 더" 다시 떴다.
++    // 다시 재생하면 카드가 다시 뜬다. (차 블루투스 곡 정보는 카드가 아니라 미디어 세션이 보내서 그대로다.)
++    if (!startInForeground) {
++      val ref = currentPlayer?.ref
++      if (ref != null && (!ref.playWhenReady || ref.playbackState == Player.STATE_IDLE)) {
++        stopForeground(STOP_FOREGROUND_REMOVE)
++        notificationManager.cancel(notificationId)
++        return
++      }
++    }
+     val notification = buildNotification() ?: return
+ 
+     if (startInForeground) {
+@@ -312,7 +323,19 @@ class AudioControlsService : MediaSessionService() {
+         )
+       }
+     } else {
+-      notificationManager.notify(notificationId, notification)
++      // [스텝바이 패치] 멈췄을 때 포그라운드를 내렸으니, 재생 중이면 다시 포그라운드로 올린다.
++      // 안 되면(백그라운드 제한) 예전처럼 알림만 띄운다.
++      val promoted = currentPlayer?.ref?.isPlaying == true && try {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++          startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
++        } else {
++          startForeground(notificationId, notification)
++        }
++        true
++      } catch (e: Exception) {
++        false
++      }
++      if (!promoted) notificationManager.notify(notificationId, notification)
+     }
+   }
+ 

@@ -26,6 +26,8 @@ export const player = createAudioPlayer(null, { updateInterval: 500 });
 let state = { queue: [], index: -1, track: null, repeatIndex: 0, rate: 1 };
 const listeners = new Set();
 let pendingSeek = null;
+// 지금 곡에서 마지막으로 확인된 재생 위치(초) — 재생기가 비워졌을 때 여기서부터 다시 튼다
+let lastTime = 0;
 // 셔플 반복 중에 이번 바퀴에서 이미 튼 곡(인덱스)들 — 다음 곡은 여기 없는 곡 중에서
 // 무작위로 고르고, 이전 버튼은 이 순서를 거꾸로 밟아 돌아간다.
 let shuffleHistory = [];
@@ -66,15 +68,29 @@ export function usePlayback() {
 // 위젯으로 화면 없이(헤드리스) 깨어났을 때는 화면이 없어 권한 요청 창을 띄울 수 없다.
 let headlessStart = false;
 
+// 백그라운드 재생 허용은 첫 재생 때가 아니라 앱(또는 위젯으로 깨어난 JS)이 뜨자마자 켠다.
+// 예전엔 첫 재생 때만 켜서, 앱을 열기만 하고 닫은 뒤 위젯으로 재생을 누르면 이 설정이 꺼진 채라
+// 버튼만 '재생 중'으로 바뀌고 소리가 안 났다.
+let audioModeReady = null;
+export function ensureAudioMode() {
+  if (!audioModeReady) {
+    audioModeReady = setAudioModeAsync({
+      playsInSilentMode: true,
+      shouldPlayInBackground: true,
+      interruptionMode: 'doNotMix',
+    }).catch(() => {
+      audioModeReady = null;
+    });
+  }
+  return audioModeReady;
+}
+ensureAudioMode();
+
 export async function preparePlayback() {
   if (prepared) return;
   prepared = true;
 
-  await setAudioModeAsync({
-    playsInSilentMode: true,
-    shouldPlayInBackground: true,
-    interruptionMode: 'doNotMix',
-  });
+  await ensureAudioMode();
 
   try {
     if (!headlessStart) await requestNotificationPermissionsAsync();
@@ -88,38 +104,61 @@ export async function preparePlayback() {
 // 우리 쪽에서 고정된 이미지를 하나 줘서 항상 같은 차분한 톤이 나오게 한다.
 // require() 는 번들 안의 자산을 가리킬 뿐이고, 기기에서 실제로 읽을 수 있는
 // file:// 경로로 바꾸려면 expo-asset 으로 한 번 내려받아야(캐시로 복사) 한다.
-let artworkUriPromise = null;
-function resolveArtworkUri() {
-  if (!artworkUriPromise) {
-    artworkUriPromise = (async () => {
-      try {
-        const asset = Asset.fromModule(require('../assets/artwork.png'));
-        await asset.downloadAsync();
-        return asset.localUri || asset.uri || null;
-      } catch {
-        return null;
-      }
+// 앱 화면 없이(위젯으로) 깨어났을 때 이 그림 준비가 끝나지 않고 멈춰 버리는 일이 있었다.
+// 예전엔 그림이 준비될 때까지 잠금화면 컨트롤을 아예 안 켰고, 멈춘 결과까지 저장돼서
+// 그 뒤로는 앱을 열어도 잠금화면 컨트롤·차(블루투스) 곡 정보가 계속 안 나왔다.
+// 이제 1.5초 안에 못 가져오면 포기하고(다음에 다시 시도), 컨트롤은 그림 없이 먼저 켠다.
+let artworkUrl = null;
+let artworkLoading = null;
+function loadArtwork() {
+  if (artworkUrl) return Promise.resolve(artworkUrl);
+  if (!artworkLoading) {
+    const load = (async () => {
+      const asset = Asset.fromModule(require('../assets/artwork.png'));
+      await asset.downloadAsync();
+      return asset.localUri || asset.uri || null;
     })();
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 1500));
+    artworkLoading = Promise.race([load, timeout])
+      .catch(() => null)
+      .then((url) => {
+        artworkLoading = null;
+        if (url) artworkUrl = url;
+        return url;
+      });
   }
-  return artworkUriPromise;
+  return artworkLoading;
 }
 
-async function applyLockScreen(item) {
+function lockScreenMeta(item, art) {
+  return {
+    title: displayName(item.name),
+    artist: item.folder,
+    albumTitle: '스텝바이',
+    ...(art ? { artworkUrl: art } : {}),
+  };
+}
+
+function applyLockScreen(item) {
   if (!item) return;
   try {
-    const artworkUrl = await resolveArtworkUri();
-    player.setActiveForLockScreen(
-      true,
-      {
-        title: displayName(item.name),
-        artist: item.folder,
-        albumTitle: '스텝바이',
-        ...(artworkUrl ? { artworkUrl } : {}),
-      },
-      { showSeekForward: true, showSeekBackward: true }
-    );
+    // 그림을 기다리지 않고 제목과 함께 바로 켠다 — 차 블루투스로 가는 곡 정보도 이 컨트롤이 보낸다.
+    player.setActiveForLockScreen(true, lockScreenMeta(item, artworkUrl), {
+      showSeekForward: true,
+      showSeekBackward: true,
+    });
   } catch {
     // 잠금화면 표시가 안 되어도 재생은 계속된다.
+  }
+  if (!artworkUrl) {
+    loadArtwork().then((art) => {
+      if (!art || state.track?.id !== item.id) return;
+      try {
+        player.updateLockScreenMetadata(lockScreenMeta(item, art));
+      } catch {
+        // 그림만 못 붙인 것 — 무시한다.
+      }
+    });
   }
 }
 
@@ -146,6 +185,7 @@ function load(index, startPosition = 0) {
   if (!item) return;
 
   pendingSeek = startPosition > 1 ? startPosition : null;
+  lastTime = startPosition;
 
   player.replace(item.uri);
   player.loop = REPEAT_MODES[state.repeatIndex].mode === 'single';
@@ -184,7 +224,13 @@ function pushWidgetState(playing) {
 // 위젯 버튼(재생/이전/다음)은 여기로 들어온다. 앱이 완전히 꺼져 있으면 이
 // 리스너 자체가 없으니(=JS 가 안 떠 있으니) 위젯 쪽에서 대신 앱을 연다 —
 // 백그라운드 재생 중일 때만 이 경로가 실제로 쓰인다.
-PlayerWidget?.addListener('onWidgetAction', (e) => {
+PlayerWidget?.addListener('onWidgetAction', async (e) => {
+  await ensureAudioMode();
+  // 앱을 열기만 하고 아무것도 안 틀었으면 지금 곡이 없다 — 마지막으로 듣던 곳부터 이어 튼다
+  if (!state.track && e?.action !== 'repeat') {
+    resumeFromWidget(e?.action);
+    return;
+  }
   if (e?.action === 'toggle') togglePlay();
   else if (e?.action === 'next') next();
   else if (e?.action === 'previous') previous();
@@ -192,6 +238,7 @@ PlayerWidget?.addListener('onWidgetAction', (e) => {
 });
 
 player.addListener('playbackStatusUpdate', (status) => {
+  if (status.isLoaded && status.currentTime > 0) lastTime = status.currentTime;
   if (pendingSeek != null && status.isLoaded) {
     const target = pendingSeek;
     pendingSeek = null;
@@ -299,10 +346,20 @@ export function pruneQueue(validIds) {
   emit({ queue, index: queue.findIndex((item) => item.id === state.track.id) });
 }
 
+// 알림창의 재생 카드를 닫으면 안드로이드가 재생기에 "정지"를 보내 불러온 파일까지 비운다.
+// 그 상태에서 play() 만 부르면 아무 소리도 안 나서(위젯 버튼만 재생 중으로 바뀜),
+// 비어 있으면 마지막으로 듣던 위치부터 다시 불러와 튼다.
 export function togglePlay() {
   if (!state.track) return;
-  if (player.playing) player.pause();
-  else player.play();
+  if (player.playing) {
+    player.pause();
+    return;
+  }
+  if (!player.isLoaded && !player.isBuffering) {
+    load(state.index, lastTime);
+    return;
+  }
+  player.play();
 }
 
 export function next() {

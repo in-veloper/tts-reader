@@ -1,0 +1,123 @@
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/MetadataInjectingPlayer.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/MetadataInjectingPlayer.kt
+index 18203a3..87fb0ae 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/MetadataInjectingPlayer.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/MetadataInjectingPlayer.kt
+@@ -5,15 +5,22 @@ import android.os.Looper
+ import androidx.core.net.toUri
+ import androidx.media3.common.FlagSet
+ import androidx.media3.common.ForwardingPlayer
++import androidx.media3.common.MediaItem
+ import androidx.media3.common.MediaMetadata
+ import androidx.media3.common.Player
++import androidx.media3.common.Timeline
+ import androidx.media3.common.util.UnstableApi
++import androidx.media3.exoplayer.source.ForwardingTimeline
+ import expo.modules.audio.Metadata
+ import java.util.IdentityHashMap
+ 
+ // MediaSession reads artwork from Player.mediaMetadata, but expo-audio lock-screen metadata can
+ // change independently of the underlying MediaItem. This wrapper lets the session observe those
+ // metadata updates without replacing the active media item on the real ExoPlayer instance.
++//
++// [스텝바이 패치] 블루투스(차량 AVRCP)는 현재 곡 정보 말고도 재생 목록(큐)의 항목과
++// 재생 목록 이름을 따로 읽는다. 원래는 현재 곡 정보만 바꿔 끼워서, 차 화면에 재생 목록이
++// "Not provided" 로 떴다. 큐 항목(타임라인의 현재 항목)과 재생 목록 이름에도 같은 정보를 넣는다.
+ @UnstableApi
+ internal class MetadataInjectingPlayer(
+   player: Player
+@@ -48,6 +55,41 @@ internal class MetadataInjectingPlayer(
+       .build()
+   }
+ 
++  // 재생 목록 이름 — 차 화면의 "재생 목록" 칸에 쓰인다.
++  override fun getPlaylistMetadata(): MediaMetadata {
++    val metadata = injectedMetadata ?: return super.getPlaylistMetadata()
++    val name = metadata.albumTitle ?: metadata.artist ?: return super.getPlaylistMetadata()
++    return super.getPlaylistMetadata().buildUpon().setTitle(name).build()
++  }
++
++  private fun withInjected(item: MediaItem?): MediaItem? {
++    if (item == null || injectedMetadata == null) return item
++    return item.buildUpon().setMediaMetadata(mediaMetadata).build()
++  }
++
++  override fun getCurrentMediaItem(): MediaItem? = withInjected(super.getCurrentMediaItem())
++
++  override fun getMediaItemAt(index: Int): MediaItem {
++    val item = super.getMediaItemAt(index)
++    return if (index == currentMediaItemIndex) withInjected(item) ?: item else item
++  }
++
++  // 큐 항목은 타임라인에서 읽힌다 — 현재 항목의 창(Window)에도 같은 정보를 넣어 준다.
++  override fun getCurrentTimeline(): Timeline {
++    val timeline = super.getCurrentTimeline()
++    if (injectedMetadata == null || timeline.isEmpty) return timeline
++    val current = currentMediaItemIndex
++    return object : ForwardingTimeline(timeline) {
++      override fun getWindow(windowIndex: Int, window: Timeline.Window, defaultPositionProjectionUs: Long): Timeline.Window {
++        super.getWindow(windowIndex, window, defaultPositionProjectionUs)
++        if (windowIndex == current) {
++          window.mediaItem = withInjected(window.mediaItem) ?: window.mediaItem
++        }
++        return window
++      }
++    }
++  }
++
+   fun updateMetadata(metadata: Metadata?) {
+     if (Looper.myLooper() != applicationLooper) {
+       handler.post { updateMetadata(metadata) }
+@@ -65,14 +107,20 @@ internal class MetadataInjectingPlayer(
+     val events = Player.Events(
+       FlagSet.Builder()
+         .add(Player.EVENT_MEDIA_METADATA_CHANGED)
++        .add(Player.EVENT_PLAYLIST_METADATA_CHANGED)
++        .add(Player.EVENT_TIMELINE_CHANGED)
+         .build()
+     )
+     val currentListeners = synchronized(listeners) {
+       listeners.keys.toList()
+     }
+ 
++    val timeline = currentTimeline
++    val playlistMetadata = playlistMetadata
+     currentListeners.forEach {
+       it.onMediaMetadataChanged(newMetadata)
++      it.onPlaylistMetadataChanged(playlistMetadata)
++      it.onTimelineChanged(timeline, Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED)
+     }
+     currentListeners.forEach {
+       it.onEvents(this, events)
+@@ -86,6 +134,14 @@ internal class MetadataInjectingPlayer(
+       listener.onMediaMetadataChanged(this@MetadataInjectingPlayer.mediaMetadata)
+     }
+ 
++    override fun onPlaylistMetadataChanged(mediaMetadata: MediaMetadata) {
++      listener.onPlaylistMetadataChanged(this@MetadataInjectingPlayer.playlistMetadata)
++    }
++
++    override fun onTimelineChanged(timeline: Timeline, reason: Int) {
++      listener.onTimelineChanged(this@MetadataInjectingPlayer.currentTimeline, reason)
++    }
++
+     override fun onEvents(player: Player, events: Player.Events) {
+       listener.onEvents(this@MetadataInjectingPlayer, events)
+     }
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+index 196a5d5..d4977ff 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/AudioControlsService.kt
+@@ -292,6 +292,13 @@ class AudioControlsService : MediaSessionService() {
+ 
+   private fun postOrStartForegroundNotificationNow(startInForeground: Boolean) {
+     val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
++    // [스텝바이 패치] 알림 카드를 닫으면 시스템이 재생기를 정지(IDLE)시키는데, 그 상태 변화가
++    // 다시 이 함수를 불러 카드가 "한 번 더" 떴다. 비워진(IDLE) 상태에선 카드를 지우고 다시 띄우지 않는다.
++    // 재생을 다시 시작하면(BUFFERING/READY) 그때 다시 뜬다.
++    if (!startInForeground && currentPlayer?.ref?.playbackState == Player.STATE_IDLE) {
++      notificationManager.cancel(notificationId)
++      return
++    }
+     val notification = buildNotification() ?: return
+ 
+     if (startInForeground) {

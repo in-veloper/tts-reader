@@ -9,7 +9,7 @@ import { resumeFromWidget } from './src/playback';
 AppRegistry.registerHeadlessTask('StepbyWidgetTask', () => async ({ action }) => {
   await resumeFromWidget(action, { headless: true });
   // 재생 알림(잠금화면 컨트롤)이 붙을 시간을 조금 준 뒤 작업을 끝낸다
-  await new Promise((resolve) => setTimeout(resolve, 3000));
+  await new Promise((resolve) => setTimeout(resolve, 6000));
 });
 
 registerRootComponent(App);

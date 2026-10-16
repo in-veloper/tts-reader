@@ -16,6 +16,8 @@
       android:label="@string/player_widget_label">
       <intent-filter>
         <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+        <!-- 앱을 업데이트하면 위젯이 "불러오는 중"에 멈춰 있지 않게 바로 다시 그린다 -->
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
       </intent-filter>
       <meta-data
         android:name="android.appwidget.provider"
