@@ -339,7 +339,9 @@ class TtsFileModule : Module() {
       "language" to language,
       "quality" to if (voice.quality > Voice.QUALITY_NORMAL) "Enhanced" else "Default",
       // 네트워크가 필요한 음성은 비행기 모드나 데이터가 없을 때 소리가 안 난다.
-      "networkRequired" to voice.isNetworkConnectionRequired
+      "networkRequired" to voice.isNetworkConnectionRequired,
+      // 구글 엔진은 폰에 아직 받지 않은 음성도 목록에 같이 준다 — 그런 음성은 듣기를 눌러도 소리가 안 난다.
+      "installed" to !(voice.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) ?: false)
     )
   }
 

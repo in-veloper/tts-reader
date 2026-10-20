@@ -36,10 +36,6 @@ export function MiniPlayer({ onPress }) {
       onPress={onPress}
       style={({ pressed }) => [styles.mini, pressed && { opacity: 0.9 }]}
     >
-      <View style={styles.miniProgress}>
-        <View style={[styles.miniProgressFill, { width: `${ratio * 100}%` }]} />
-      </View>
-
       <View style={styles.miniBody}>
         <View style={styles.miniText}>
           <Text style={styles.miniTitle} numberOfLines={1}>
@@ -62,6 +58,11 @@ export function MiniPlayer({ onPress }) {
         <Pressable onPress={next} hitSlop={10} style={styles.miniGhost}>
           <Ionicons name="play-skip-forward" size={18} color={colors.textDim} />
         </Pressable>
+      </View>
+
+      {/* 예전엔 카드 맨 위 가장자리에 붙어 있어서 둥근 모서리에 잘려 보였다 — 안쪽 아래로 옮긴다 */}
+      <View style={styles.miniProgress}>
+        <View style={[styles.miniProgressFill, { width: `${ratio * 100}%` }]} />
       </View>
     </Pressable>
   );
@@ -196,14 +197,22 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     overflow: 'hidden',
   },
-  miniProgress: { height: 2, backgroundColor: colors.surfaceHigh },
-  miniProgressFill: { height: 2, backgroundColor: colors.accent },
+  miniProgress: {
+    height: 3,
+    marginHorizontal: 12,
+    marginBottom: 10,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceHigh,
+    overflow: 'hidden',
+  },
+  miniProgressFill: { height: 3, borderRadius: radius.pill, backgroundColor: colors.accent },
   miniBody: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingTop: 10,
+    paddingBottom: 8,
   },
   miniText: { flex: 1 },
   miniTitle: { color: colors.text, fontSize: 13, fontWeight: '700' },

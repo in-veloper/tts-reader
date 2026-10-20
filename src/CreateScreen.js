@@ -36,7 +36,7 @@ const PREVIEW_TEXT = '안녕하세요. 이 목소리로 읽어 드릴게요.';
 // 길이와 같은 느낌으로 맞춰 뒀다 — 실시간 읽기는 setTimeout, 파일은 실제 무음.
 const GAP_MS = { clause: 120, sentence: 220, line: 350, para: 900, none: 0 };
 
-export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
+export default function CreateScreen({ onToast, onBusy, folders, onSaved, keyboardOpen }) {
   const [text, setText] = useState('');
   const [status, setStatus] = useState('idle'); // idle | playing | paused
   const [progress, setProgress] = useState({ index: 0, total: 0 });
@@ -99,6 +99,7 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
           note: v.networkRequired
             ? '더 자연스러움 · 인터넷 필요'
             : '인터넷 없이 동작',
+          needsDownload: v.installed === false,
         };
       });
   }, [voices]);
@@ -469,7 +470,8 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
         </View>
       </Card>
 
-      {progress.total > 0 && (
+      {/* 키보드가 떠 있는 동안엔 입력칸만 남긴다 — 버튼들은 키보드를 내리면 다시 보인다 */}
+      {!keyboardOpen && progress.total > 0 && (
         <View style={styles.progressBlock}>
           <ProgressBar value={(progress.index + 1) / progress.total} />
           <View style={styles.progressFoot}>
@@ -483,7 +485,7 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
         </View>
       )}
 
-      <View style={styles.controls}>
+      <View style={[styles.controls, keyboardOpen && styles.hidden]}>
         <PrimaryButton
           icon={playing ? 'pause' : 'play'}
           text={playing ? '일시정지' : status === 'paused' ? '이어읽기' : '읽기'}
@@ -493,13 +495,15 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
         <CircleButton icon="stop" onPress={handleStop} disabled={status === 'idle'} />
       </View>
 
-      <GhostButton
-        icon="download-outline"
-        text="오디오 파일로 저장"
-        onPress={() => setFolderSheetOpen(true)}
-        disabled={!text.trim() || busy}
-        busy={busy}
-      />
+      {!keyboardOpen && (
+        <GhostButton
+          icon="download-outline"
+          text="오디오 파일로 저장"
+          onPress={() => setFolderSheetOpen(true)}
+          disabled={!text.trim() || busy}
+          busy={busy}
+        />
+      )}
 
       <Sheet
         visible={folderSheetOpen}
@@ -604,6 +608,7 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
                     key={v.identifier}
                     name={v.title}
                     sub={v.note}
+                    needsDownload={v.needsDownload}
                     active={voice === v.identifier}
                     onSelect={() => setVoice(v.identifier)}
                     onPreview={() => previewVoice(v.identifier)}
@@ -622,7 +627,7 @@ export default function CreateScreen({ onToast, onBusy, folders, onSaved }) {
   );
 }
 
-function VoiceRow({ name, sub, active, onSelect, onPreview }) {
+function VoiceRow({ name, sub, needsDownload, active, onSelect, onPreview }) {
   return (
     <Pressable
       onPress={onSelect}
@@ -635,9 +640,17 @@ function VoiceRow({ name, sub, active, onSelect, onPreview }) {
       />
       <View style={styles.grow}>
         <Text style={styles.voiceName}>{name}</Text>
-        <Text style={styles.voiceSub} numberOfLines={1}>
-          {sub}
-        </Text>
+        <View style={styles.voiceSubRow}>
+          <Text style={styles.voiceSub} numberOfLines={1}>
+            {sub}
+          </Text>
+          {/* 폰에 아직 받지 않은 음성 — 설정 › 텍스트 음성 변환에서 받아야 소리가 난다 */}
+          {needsDownload && (
+            <View style={styles.downloadBadge}>
+              <Text style={styles.downloadText}>다운로드 필요</Text>
+            </View>
+          )}
+        </View>
       </View>
       <Pressable onPress={onPreview} hitSlop={10} style={styles.preview}>
         <Ionicons name="play" size={14} color={colors.accentSoft} />
@@ -670,20 +683,17 @@ function SliderRow({ label, value, onChange }) {
   );
 }
 
+// 파일 이름은 글의 첫 줄 그대로(날짜 없이). 같은 이름이 있으면 안드로이드가 " (1)" 을 붙여 준다.
 function makeFileName(text) {
-  const now = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  const stamp =
-    `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
-    `_${pad(now.getHours())}${pad(now.getMinutes())}`;
-
-  const head = text
+  const firstLine = text.trim().split(/\r?\n/)[0] || '';
+  const head = firstLine
+    .replace(/[\\/:*?"<>|\s]+/g, ' ')
     .trim()
-    .slice(0, 14)
-    .replace(/[\\/:*?"<>|.\s]+/g, ' ')
+    .slice(0, 80)
+    .replace(/[.\s]+$/, '')
     .trim();
 
-  return head ? `${stamp} ${head}` : stamp;
+  return head || '스텝바이';
 }
 
 const styles = StyleSheet.create({
@@ -701,6 +711,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.border,
   },
+  hidden: { display: 'none' },
   toolbar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -791,7 +802,15 @@ const styles = StyleSheet.create({
   },
   voiceRowActive: { borderColor: colors.accent },
   voiceName: { color: colors.text, fontSize: 15, fontWeight: '600' },
-  voiceSub: { color: colors.textFaint, fontSize: 11, marginTop: 2 },
+  voiceSubRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
+  voiceSub: { flexShrink: 1, color: colors.textFaint, fontSize: 11 },
+  downloadBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: radius.pill,
+    backgroundColor: colors.bg,
+  },
+  downloadText: { color: colors.textDim, fontSize: 10, fontWeight: '700' },
   preview: {
     flexDirection: 'row',
     alignItems: 'center',

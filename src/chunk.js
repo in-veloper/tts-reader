@@ -108,11 +108,48 @@ export function segmentText(input) {
   return segments;
 }
 
-// 파일 저장용 분할. 읽기(segmentText)처럼 문장·쉼표마다 끊으면 조각마다 엔진이
-// 억양을 처음부터 다시 잡아서, 쉼표 뒤 조각이 문장 끝처럼 뚝 떨어지게 읽히고
-// 이어붙인 자리마다 소리가 씹힌다. 저장은 실시간이 아니라서 끊을 이유가 없으니
-// 줄(문단) 단위로 통째로 넘기고, 문장 안의 쉼은 엔진이 자연스럽게 넣게 둔다.
-// 한 줄이 엔진 한도(MAX_LEN)를 넘을 때만 문장 경계에서 나눈다.
+// 파일 저장용 분할. 읽기(segmentText)처럼 쉼표마다 끊으면 조각마다 엔진이 억양을
+// 처음부터 다시 잡아서, 쉼표 뒤 조각이 문장 끝처럼 뚝 떨어지게 읽힌다. 그래서 쉼표에선
+// 끊지 않고 문장(마침표) 단위로 넘긴다.
+//
+// 그렇다고 한 줄을 통째로(수천 자) 넘기면 안 된다 — 구글 음성은 한 번에 받는 글이 길면
+// 뒤로 갈수록 띄어쓰기·쉼을 무시하고 몰아서 읽는다(1.7.x 에서 줄 단위로 바꾼 뒤 생긴 문제).
+// 짧은 문장 여러 개를 묶어 넘겨도(200자) 띄어 읽을 곳을 붙여 읽는 일이 남아서, 한 번에 한 문장씩만
+// 넘긴다. SAVE_MAX 자보다 긴 문장만 쉼표 지점에서 나눈다.
+const SAVE_MAX = 120;
+
+// 조각들을 max 자 안쪽으로 묶는다. 조각 하나가 max 를 넘으면 공백 기준으로 자른다.
+function pack(pieces, max) {
+  const out = [];
+  let cur = '';
+  for (const piece of pieces) {
+    const parts = piece.length > max ? splitAtSpaces(piece, max) : [piece];
+    for (const p of parts) {
+      if (cur && cur.length + 1 + p.length > max) {
+        out.push(cur);
+        cur = p;
+      } else {
+        cur = cur ? `${cur} ${p}` : p;
+      }
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+function splitAtSpaces(text, max) {
+  const parts = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf(' ', max);
+    if (cut < max * 0.5) cut = max;
+    parts.push(rest.slice(0, cut).trim());
+    rest = rest.slice(cut).trim();
+  }
+  if (rest) parts.push(rest);
+  return parts;
+}
+
 export function segmentForSave(input) {
   const text = (input || '').replace(/\r\n?/g, '\n').trim();
   if (!text) return [];
@@ -127,30 +164,31 @@ export function segmentForSave(input) {
       .filter(Boolean);
 
     lines.forEach((line, li) => {
-      // 문장 단위로 쌓다가 한도를 넘기 직전에 끊는다
-      const sentences = splitByPunctuation(line)
-        .reduce((acc, piece) => {
-          const last = acc[acc.length - 1];
-          if (last && last.open) {
-            last.text += ' ' + piece.text;
-            last.open = piece.gap !== 'sentence';
-          } else {
-            acc.push({ text: piece.text, open: piece.gap !== 'sentence' });
-          }
-          return acc;
-        }, [])
-        .flatMap((s) => hardSplit(s.text));
-
-      let cur = '';
-      for (const s of sentences.length ? sentences : [line]) {
-        if (cur && cur.length + 1 + s.length > MAX_LEN) {
-          segments.push({ text: cur, gap: 'sentence' });
-          cur = s;
-        } else {
-          cur = cur ? `${cur} ${s}` : s;
+      // 쉼표 조각들을 다시 문장으로 이어 붙인다(문장마다 쉼표 조각 목록을 같이 기억)
+      const sentences = [];
+      let open = null;
+      for (const piece of splitByPunctuation(line)) {
+        if (!open) {
+          open = { clauses: [] };
+          sentences.push(open);
         }
+        open.clauses.push(piece.text);
+        if (piece.gap === 'sentence') open = null;
       }
-      if (cur) segments.push({ text: cur, gap: 'sentence' });
+
+      // 문장이 SAVE_MAX 를 넘으면 쉼표 지점에서 나눈다(문장끼리는 묶지 않는다)
+      const pieces = sentences.length
+        ? sentences.flatMap((s) => {
+            const whole = s.clauses.join(' ');
+            return whole.length > SAVE_MAX ? pack(s.clauses, SAVE_MAX) : [whole];
+          })
+        : [line];
+
+      // 문장 중간(쉼표)에서 나뉜 자리는 쉼표만큼만 짧게 쉰다
+      for (const t of pieces) {
+        const ended = SENTENCE_END.includes(t[t.length - 1]);
+        segments.push({ text: t, gap: ended ? 'sentence' : 'clause' });
+      }
 
       const lastLine = li === lines.length - 1;
       const lastPara = pi === paragraphs.length - 1;

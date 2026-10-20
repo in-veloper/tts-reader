@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
+  Easing,
   Keyboard,
   Modal,
   PanResponder,
@@ -111,6 +112,59 @@ export function ProgressBar({ value }) {
         end={{ x: 1, y: 0 }}
         style={[styles.fill, { width }]}
       />
+    </View>
+  );
+}
+
+// 저장 진행 막대. 구간 하나가 끝날 때마다 뚝 뛰지 않고, 바뀐 값까지 부드럽게 따라간 뒤
+// 다음 구간이 끝날 때까지 그 구간 쪽으로 천천히 차오른다(지금까지 구간당 걸린 시간을 보고 속도를 맞춘다).
+// 다음 구간에 닿기 직전(90%)에서 멈춰 기다리므로 실제 진행보다 앞서 가지 않는다.
+const DEFAULT_STEP_MS = 4000;
+
+export function SmoothProgressBar({ index, total }) {
+  const anim = useRef(new Animated.Value(0)).current;
+  const startedAt = useRef(0);
+
+  useEffect(() => {
+    if (!total) return undefined;
+    const now = Date.now();
+    if (index === 0 || !startedAt.current) startedAt.current = now;
+
+    const value = Math.min(1, index / total);
+    const stepMs = index > 0 ? (now - startedAt.current) / index : DEFAULT_STEP_MS;
+    const next = Math.min(1, (index + 0.9) / total);
+
+    anim.stopAnimation();
+    const seq = Animated.sequence([
+      Animated.timing(anim, {
+        toValue: value,
+        duration: 350,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: false,
+      }),
+      Animated.timing(anim, {
+        toValue: index >= total ? 1 : next,
+        duration: Math.max(600, stepMs * 1.1),
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: false,
+      }),
+    ]);
+    seq.start();
+    return () => seq.stop();
+  }, [index, total, anim]);
+
+  const width = anim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'], extrapolate: 'clamp' });
+
+  return (
+    <View style={styles.track}>
+      <Animated.View style={[styles.fill, { width, overflow: 'hidden' }]}>
+        <LinearGradient
+          colors={gradient}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 0 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </Animated.View>
     </View>
   );
 }
@@ -358,7 +412,7 @@ export function Overlay({ visible, text, progress }) {
 
           {hasProgress ? (
             <View style={styles.overlayProgress}>
-              <ProgressBar value={progress.index / progress.total} />
+              <SmoothProgressBar index={progress.index} total={progress.total} />
               <Text style={styles.overlayCount}>
                 {progress.index} / {progress.total} 구간
               </Text>

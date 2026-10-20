@@ -54,6 +54,17 @@ function Main() {
   const [sleepMinutes, setSleepMinutes] = useState(0);
   const [sleepAt, setSleepAt] = useState(null);
   const [now, setNow] = useState(Date.now());
+  // 키보드가 올라오면 미니 플레이어·탭 메뉴까지 같이 밀려 올라와 입력칸이 한두 줄만 남았다.
+  // 키보드가 떠 있는 동안엔 둘을 숨겨 글 고치는 칸을 최대한 넓힌다.
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', () => setKeyboardOpen(true));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboardOpen(false));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   const { track } = usePlayback();
   const status = useAudioPlayerStatus(player);
@@ -194,6 +205,7 @@ function Main() {
                 onBusy={setBusy}
                 folders={folders}
                 onSaved={refresh}
+                keyboardOpen={keyboardOpen}
               />
             ) : (
               <LibraryScreen
@@ -208,9 +220,9 @@ function Main() {
             )}
           </View>
 
-          <MiniPlayer onPress={() => setPlayerOpen(true)} />
+          {!keyboardOpen && <MiniPlayer onPress={() => setPlayerOpen(true)} />}
 
-          <View style={styles.tabBar}>
+          <View style={[styles.tabBar, keyboardOpen && styles.hidden]}>
             <Tab
               icon="create-outline"
               activeIcon="create"
@@ -276,6 +288,7 @@ const styles = StyleSheet.create({
   brand: { color: colors.text, fontFamily: 'Pretendard-Bold', fontSize: 20, letterSpacing: 5 },
 
   content: { flex: 1 },
+  hidden: { display: 'none' },
 
   tabBar: {
     flexDirection: 'row',
