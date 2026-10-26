@@ -23,7 +23,7 @@ import {
   loadLibrary,
   savePosition,
 } from './src/library';
-import { playQueue, player, pruneQueue, resumeFromWidget, usePlayback } from './src/playback';
+import { playQueue, player, resumeFromWidget, syncQueue, usePlayback } from './src/playback';
 import { colors, radius } from './src/theme';
 import { Overlay, Toast } from './src/ui';
 
@@ -78,7 +78,7 @@ function Main() {
       await ensureAudioPermission();
       const { items: found, folders: names } = await loadLibrary();
       setItems(found);
-      pruneQueue(found.map((item) => item.id));
+      syncQueue(found);
       setFolders(names);
     } catch (e) {
       setToast({ type: 'error', message: e?.message || '목록을 불러오지 못했습니다.' });
@@ -165,9 +165,9 @@ function Main() {
     setSleepAt(minutes > 0 ? Date.now() + minutes * 60000 : null);
   }, []);
 
-  const play = useCallback(async (queue, index) => {
+  const play = useCallback(async (queue, index, scope) => {
     try {
-      await playQueue(queue, index, queue[index]?.position || 0);
+      await playQueue(queue, index, queue[index]?.position || 0, scope);
     } catch (e) {
       setToast({ type: 'error', message: e?.message || '재생에 실패했습니다.' });
     }

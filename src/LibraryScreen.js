@@ -152,7 +152,7 @@ export default function LibraryScreen({
           <Row
             item={item}
             active={activeId === item.id}
-            onPress={() => onPlay(visible, index)}
+            onPress={() => onPlay(visible, index, folder)}
             onMenu={() => {
               setMenuItem(item);
               setNewName(displayName(item.name));
@@ -172,7 +172,7 @@ export default function LibraryScreen({
           onPress={() => {
             const index = visible.findIndex((i) => i.id === menuItem.id);
             setMenuItem(null);
-            if (index >= 0) onPlay(visible, index);
+            if (index >= 0) onPlay(visible, index, folder);
           }}
         />
         <MenuRow icon="folder-outline" text="과목 옮기기" onPress={() => setMoveOpen(true)} />

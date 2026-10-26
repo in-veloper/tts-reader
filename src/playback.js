@@ -7,7 +7,7 @@ import {
   setAudioModeAsync,
 } from 'expo-audio';
 
-import { displayName, ensureAudioPermission, loadLibrary } from './library';
+import { ALL, displayName, ensureAudioPermission, loadLibrary } from './library';
 import PlayerWidget from '../modules/player-widget';
 
 const LAST_PLAY_KEY = 'stepby/lastPlay';
@@ -24,6 +24,8 @@ export const REPEAT_MODES = [
 export const player = createAudioPlayer(null, { updateInterval: 500 });
 
 let state = { queue: [], index: -1, track: null, repeatIndex: 0, rate: 1 };
+// 이 큐를 어느 목록(전체/과목)에서 만들었는지 — 재생 중에 새 파일이 생기면 같은 목록에 속하는 것만 큐에 넣는다
+let queueScope = ALL;
 const listeners = new Set();
 let pendingSeek = null;
 // 지금 곡에서 마지막으로 확인된 재생 위치(초) — 재생기가 비워졌을 때 여기서부터 다시 튼다
@@ -150,6 +152,11 @@ function lockScreenMeta(item, art) {
 // 다음 곡으로 넘어가도 첫 곡 제목이 그대로 남았다. updateLockScreenMetadata 는
 // 같은 세션에 "곡 정보 바뀜"만 알려서 붙어 있는 쪽이 바로 따라 바뀐다.
 let lockScreenOn = false;
+// 우리가 곡을 불러오는 중이면 true — 불러오기가 끝나기 전의 "로드 안 됨"은 정상이다.
+// 그게 아닌데 로드가 풀렸다면 알림 카드를 닫아 안드로이드가 재생기를 비운 것이고,
+// 이때 미디어 세션도 같이 사라진다. 그 뒤 곡 정보만 갈아 끼우면 아무도 안 듣는 세션에
+// 보내는 셈이라 차·알림창에 "Not provided" 가 뜨므로, 다음 재생 때 세션을 새로 만들게 표시한다.
+let expectingLoad = false;
 
 function applyLockScreen(item) {
   if (!item) return;
@@ -193,6 +200,7 @@ function persistLastPlay() {
       ids: state.queue.map((item) => item.id),
       currentId: track.id,
       repeatIndex: state.repeatIndex,
+      scope: queueScope,
     })
   ).catch(() => {});
 }
@@ -204,6 +212,7 @@ function load(index, startPosition = 0) {
   pendingSeek = startPosition > 1 ? startPosition : null;
   lastTime = startPosition;
 
+  expectingLoad = true;
   player.replace(item.uri);
   player.loop = REPEAT_MODES[state.repeatIndex].mode === 'single';
   player.setPlaybackRate(state.rate);
@@ -255,6 +264,9 @@ PlayerWidget?.addListener('onWidgetAction', async (e) => {
 });
 
 player.addListener('playbackStatusUpdate', (status) => {
+  if (status.isLoaded) expectingLoad = false;
+  else if (!expectingLoad) lockScreenOn = false;
+
   if (status.isLoaded && status.currentTime > 0) lastTime = status.currentTime;
   if (pendingSeek != null && status.isLoaded) {
     const target = pendingSeek;
@@ -284,9 +296,10 @@ function advance() {
   load(last ? 0 : state.index + 1);
 }
 
-export async function playQueue(items, index, startPosition = 0) {
+export async function playQueue(items, index, startPosition = 0, scope = ALL) {
   await preparePlayback();
   shuffleHistory = [];
+  queueScope = scope || ALL;
   emit({ queue: items });
   load(index, startPosition);
 }
@@ -326,7 +339,7 @@ export async function resumeFromWidget(action, { headless = false } = {}) {
 
     const index = Math.max(0, queue.findIndex((item) => item.id === last.currentId));
     emit({ repeatIndex: last.repeatIndex ?? state.repeatIndex });
-    await playQueue(queue, index, queue[index]?.position || 0);
+    await playQueue(queue, index, queue[index]?.position || 0, last.scope);
 
     if (action === 'next') next();
     else if (action === 'previous') previous();
@@ -336,17 +349,30 @@ export async function resumeFromWidget(action, { headless = false } = {}) {
   }
 }
 
-// 서재에서 파일을 지우면 큐에 남은 유령 항목을 걷어낸다.
-export function pruneQueue(validIds) {
+// 서재 목록이 바뀔 때마다(파일 추가·삭제·이동) 재생 큐를 거기에 맞춘다.
+// 지워진 파일은 걷어내고, 재생 중에 새로 생긴 파일은 큐를 만든 목록(전체/과목)에
+// 속하면 큐에 넣는다 — 예전엔 처음 틀 때 복사해 둔 목록을 계속 써서 새 파일이 반영되지 않았다.
+// 큐 순서는 서재 목록 순서를 따른다. 지금 듣는 곡은 과목을 옮겼어도 큐에 남긴다.
+export function syncQueue(allItems) {
   if (!state.queue.length) return;
 
-  const valid = new Set(validIds);
-  const queue = state.queue.filter((item) => valid.has(item.id));
-  if (queue.length === state.queue.length) return;
+  const known = new Set(allItems.map((item) => item.id));
+  const currentId = state.track?.id;
+  const currentGone = state.track && !known.has(currentId);
 
-  const currentGone = state.track && !valid.has(state.track.id);
-  // 인덱스가 바뀌니 셔플 기록은 새로 시작한다
-  shuffleHistory = [];
+  const inScope = (item) => queueScope === ALL || item.folder === queueScope;
+  const queue = allItems.filter((item) => inScope(item) || item.id === currentId);
+
+  const same =
+    queue.length === state.queue.length &&
+    queue.every((item, i) => item.id === state.queue[i].id);
+  if (same) return;
+
+  // 인덱스가 바뀌니 셔플 기록은 곡 아이디로 옮겨 적는다
+  const playedIds = shuffleHistory.map((i) => state.queue[i]?.id);
+  shuffleHistory = playedIds
+    .map((id) => queue.findIndex((item) => item.id === id))
+    .filter((i) => i >= 0);
 
   if (!queue.length || currentGone) {
     player.pause();
@@ -362,6 +388,7 @@ export function pruneQueue(validIds) {
   }
 
   emit({ queue, index: queue.findIndex((item) => item.id === state.track.id) });
+  persistLastPlay();
 }
 
 // 알림창의 재생 카드를 닫으면 안드로이드가 재생기에 "정지"를 보내 불러온 파일까지 비운다.
@@ -374,6 +401,7 @@ export function togglePlay() {
     return;
   }
   if (!player.isLoaded && !player.isBuffering) {
+    lockScreenOn = false;
     load(state.index, lastTime);
     return;
   }
